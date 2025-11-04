@@ -1,5 +1,8 @@
-# app.py — Deep Margins Dashboard (full, corrected)
+# ================================================================
+# app.py — Deep Margins Dashboard (with login + theme integration)
+# ================================================================
 
+import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -9,10 +12,88 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
 # ------------------------------------------------------------
-# Page
+# Page + Theme Config
 # ------------------------------------------------------------
-st.set_page_config(page_title="PSS Project Analytics", layout="wide")
-st.title("📊 PSS Project Analytics")
+st.set_page_config(page_title="Deep Margins", page_icon="📊", layout="wide")
+
+THEMES = {
+    "Corporate": {"bg":"#e6e9ee","card":"#ffffff","text":"#0f172a","muted":"#6b7280","accent":"#2f6feb","template":"plotly_white",
+        "font_import":"https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap",
+        "font_family":"'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial"},
+    "Dark": {"bg":"#0f172a","card":"#111827","text":"#e5e7eb","muted":"#94a3b8","accent":"#84ccff","template":"plotly_dark",
+        "font_import":"https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&display=swap",
+        "font_family":"'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial"},
+    "Ocean": {"bg":"#e6f7fb","card":"#ffffff","text":"#0b2530","muted":"#517a88","accent":"#0ea5b7","template":"plotly_white",
+        "font_import":"https://fonts.googleapis.com/css2?family=Rubik:wght@400;600;700&display=swap",
+        "font_family":"'Rubik', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial"},
+}
+
+def apply_theme(name: str):
+    t = THEMES[name]
+    st.markdown(f"""
+    <style>
+    @import url('{t["font_import"]}');
+    html, body, .stApp {{
+        background-color: {t["bg"]} !important;
+        color: {t["text"]} !important;
+        font-family: {t["font_family"]};
+    }}
+    .accent-btn > button {{
+        background: {t["accent"]} !important;
+        color:white !important;
+        border:none; border-radius:10px; font-weight:700;
+        box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+    px.defaults.template = t["template"]
+
+# ------------------------------------------------------------
+# Login System
+# ------------------------------------------------------------
+USERS = {
+    st.secrets["USER1"]: st.secrets["USER1_PWD"],
+    st.secrets["USER2"]: st.secrets["USER2_PWD"],
+    st.secrets["USER4"]: st.secrets["USER4_PWD"],
+    st.secrets["USER5"]: st.secrets["USER5_PWD"],
+    st.secrets["USER6"]: st.secrets["USER6_PWD"],
+    st.secrets["USER7"]: st.secrets["USER7_PWD"],
+    st.secrets["USER8"]: st.secrets["USER8_PWD"],
+}
+USER_NAMES = {
+    "d.garcia":"Daniel Garcia Rey","t.held":"Thomas Held","b.arrieta":"Borja Arrieta",
+    "c.bahn":"Cristoph Bahn","tgv":"Tomas Garcia Villanueva",
+    "f.wittfeld":"Florian Wittfeld","m.peter":"Michel Peter"
+}
+
+if "auth" not in st.session_state: st.session_state["auth"] = False
+if "theme" not in st.session_state: st.session_state["theme"] = "Corporate"
+
+if not st.session_state["auth"]:
+    st.title("🔐 Deep Margins Login")
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
+    if st.button("Login", use_container_width=True):
+        if u in USERS and p == USERS[u]:
+            st.session_state["auth"] = True
+            st.session_state["user"] = u
+            st.success(f"Welcome {USER_NAMES.get(u,u).split()[0]}!")
+        else:
+            st.error("Invalid credentials.")
+    st.stop()
+
+# Sidebar theme selector
+st.sidebar.title("🎨 Theme")
+sel_theme = st.sidebar.selectbox("Choose Theme", list(THEMES.keys()),
+                                 index=list(THEMES.keys()).index(st.session_state["theme"]))
+apply_theme(sel_theme)
+st.session_state["theme"] = sel_theme
+TEMPLATE = THEMES[sel_theme]["template"]
+
+# ------------------------------------------------------------
+# Page Title
+# ------------------------------------------------------------
+st.title("📊 Deep Margins — PSS Analytics Dashboard")
 
 # ------------------------------------------------------------
 # Helpers
