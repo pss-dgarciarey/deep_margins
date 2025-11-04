@@ -142,9 +142,19 @@ def build_service_long(df_norm: pd.DataFrame, svc_cols):
                 entry[field.lower()] = val
             # Coerce numeric where needed
             for q in ["budget", "forecast", "actual"]:
-                entry[q] = pd.to_numeric(entry[q], errors="coerce")
+                val = entry.get(q, np.nan)
+                try:
+                    entry[q] = float(val)
+                except Exception:
+                    entry[q] = np.nan
+
             for q in ["h_o", "b_o", "delay"]:
-                entry[q] = pd.to_numeric(entry[q], errors="coerce").fillna(0).astype("Int64")
+                val = entry.get(q, 0)
+                try:
+                    entry[q] = int(pd.to_numeric(val, errors="coerce") or 0)
+                except Exception:
+                    entry[q] = 0
+
             # Derived
             entry["inflation_factor"] = (entry["actual"] / entry["budget"]) if entry["budget"] and entry["budget"] != 0 else np.nan
             entry["forecast_overrun"] = int((entry["forecast"] > entry["budget"])) if not pd.isna(entry["forecast"]) and not pd.isna(entry["budget"]) else np.nan
