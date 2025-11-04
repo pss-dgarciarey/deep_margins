@@ -69,14 +69,16 @@ df["cm2_forecast"]   = pd.to_numeric(df.get("cm2_forecast"), errors="coerce")
 df["cm2_actual"]     = pd.to_numeric(df.get("cm2_actual"), errors="coerce")
 df["cm2pct_forecast"]= pd.to_numeric(df.get("cm2pct_forecast"), errors="coerce")
 df["cm2pct_actual"]  = pd.to_numeric(df.get("cm2pct_actual"), errors="coerce")
+df["total_penalties"]= pd.to_numeric(df.get("total_penalties"), errors="coerce")
 
-# Weighted & real margins
+# Weighted margins
 total_contract = df["contract_value"].sum()
 total_cash     = df["cash_received"].sum()
 valid = df["contract_value"].notna() & df["cm2_forecast"].notna()
 weighted_fore_pct = (df.loc[valid, "cm2_forecast"].sum()/df.loc[valid,"contract_value"].sum())*100 if valid.any() else np.nan
 total_fore_eur = df.loc[valid, "cm2_forecast"].sum() if valid.any() else np.nan
 
+# Real margin adjustment
 cm2p_fore = df["cm2pct_forecast"].fillna(0)
 cm2p_act  = df["cm2pct_actual"].fillna(0)
 df["cm2pct_real"] = [f + (a-f)*2 if (a-f)<0 else f+(a-f) for f,a in zip(cm2p_fore,cm2p_act)]
@@ -85,7 +87,7 @@ weighted_real_pct = (df.loc[valid2,"cm2pct_real"]*df.loc[valid2,"contract_value"
 total_real_eur = df["cm2_actual"].sum()
 
 # ------------------------------------------------------------
-# KPIs (removed PT)
+# KPIs
 # ------------------------------------------------------------
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1: st.metric("Projects", df["project_id"].nunique())
@@ -95,9 +97,9 @@ with col4: st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%",
 with col5: st.metric("Real Compounded CM2% (Actual)", f"{weighted_real_pct:,.1f}%", delta=f"{total_real_eur:,.0f} €")
 
 # ------------------------------------------------------------
-# Build service data
+# Service table build
 # ------------------------------------------------------------
-service_blocks = ["tpm","cpm","eng","qa_qc_exp","hse","constr","com"]
+service_blocks = ["tpm","cpm","eng","qa_qc_exp","hse","constr","com","man","proc"]
 svc_rows = []
 for s in service_blocks:
     for field in ["budget","forecast","actual","h_o","b_o","delay"]:
@@ -116,7 +118,6 @@ for s in service_blocks:
         })
 svc = pd.DataFrame(svc_rows)
 svc["inflation"] = np.where(svc["budget"]>0, svc["actual"]/svc["budget"], np.nan)
-svc = svc[~svc["service"].isin(["PROC","MAN"])]
 
 # ------------------------------------------------------------
 # Tabs
@@ -129,25 +130,27 @@ tabs = st.tabs(["Overview", "Internal Services Metrics", "Margin Bridge", "Forec
 with tabs[0]:
     st.subheader("Portfolio Overview")
 
-    view_mode = st.radio("Y-axis:", ["CM2% Actual", "Margin Δ (EUR)"], horizontal=True)
-    if view_mode == "CM2% Actual":
-        yaxis = "cm2pct_actual"
-        title = "Contract Value vs CM2% Actual (bubble = penalties)"
-    else:
-        df["margin_delta"] = df["cm2_actual"] - df["cm2_forecast"]
-        yaxis = "margin_delta"
-        title = "Contract Value vs Margin Δ (bubble = penalties)"
+    # Correlation heatmap (restored)
+    base_cols = ["contract_value","cash_received","cm2_forecast","cm2_actual","total_penalties"]
+    df_num = df[[c for c in base_cols if c in df.columns]].apply(pd.to_numeric, errors="coerce")
+    if not df_num.empty:
+        corr = df_num.corr("spearman")
+        fig = px.imshow(corr, color_continuous_scale="tealrose", aspect="auto", title="Correlation heatmap")
+        st.plotly_chart(fig, use_container_width=True)
 
+    # Bubble chart
+    st.subheader("Contract Value vs Penalties (bubble = CM2% Forecast)")
     fig = px.scatter(
         df,
         x="contract_value",
-        y=yaxis,
-        size="total_penalties" if "total_penalties" in df.columns else None,
+        y="total_penalties",
+        size="cm2pct_forecast",
         color="country" if "country" in df.columns else None,
         hover_data=["project_id","customer"] if "customer" in df.columns else ["project_id"],
-        color_discrete_sequence=px.colors.sequential.Teal,
-        title=title
+        color_discrete_sequence=px.colors.qualitative.Vivid,
+        title="Penalty distribution across projects"
     )
+    fig.update_traces(marker=dict(line=dict(width=0.5, color="rgba(0,0,0,0.4)")))
     st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------
@@ -156,8 +159,9 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Internal Services Metrics")
 
-    mask_delay = ~svc["service"].isin(["HSE","TPM","CPM"])
-    svc.loc[~mask_delay, "delay"] = np.nan
+    # HSE, TPM, CPM, QA/QC/Exp have N/A for delays
+    mask_na = svc["service"].isin(["HSE","TPM","CPM","QA_QC_EXP"])
+    svc.loc[mask_na, "delay"] = np.nan
 
     svc_agg = svc.groupby("service").agg(
         projects=("project_id","nunique"),
@@ -172,15 +176,17 @@ with tabs[1]:
     svc_agg["inflation_factor"] = svc_agg["actual"]/svc_agg["budget"]
 
     pretty = {
-        "TPM":"Project Mgmt (TPM)","CPM":"Constr. PM (CPM)",
-        "ENG":"Engineering","QA_QC_EXP":"QA/QC/Expediting",
-        "HSE":"HSE","CONSTR":"Construction","COM":"Commissioning"
+        "TPM":"TPM","CPM":"CPM","ENG":"Engineering","QA_QC_EXP":"QA/QC/Exp",
+        "HSE":"HSE","CONSTR":"Construction","COM":"Commissioning",
+        "MAN":"Manufacturing","PROC":"Procurement"
     }
     svc_agg["Service"] = svc_agg["service"].map(pretty)
 
+    # Fill N/A text
+    svc_agg[["h_overruns","b_overruns","delays"]] = svc_agg[["h_overruns","b_overruns","delays"]].fillna("n/a")
+
     st.dataframe(
-        svc_agg[["Service","projects","budget","actual","forecast",
-                 "h_overruns","b_overruns","delays","median_inflation","inflation_factor"]],
+        svc_agg[["Service","projects","budget","actual","forecast","h_overruns","b_overruns","delays","median_inflation","inflation_factor"]],
         use_container_width=True
     )
 
@@ -207,7 +213,7 @@ with tabs[2]:
     bridge = df[["project_id","customer","contract_value","cm2_forecast","cm2_actual","margin_delta"]].copy()
     fig = px.bar(
         bridge, x="project_id", y="margin_delta", color=np.where(bridge["margin_delta"]>0,"Gain","Loss"),
-        color_discrete_sequence=["#66b3a6","#e07a5f"], hover_data=["customer"],
+        color_discrete_sequence=["#7fc8a9","#e07a5f"], hover_data=["customer"],
         title="Margin difference per project (EUR)"
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -236,8 +242,10 @@ with tabs[4]:
     heat = svc.groupby("service")[["h_o","b_o","delay"]].mean().reset_index()
     heat["Service"] = heat["service"].map(pretty)
     melt = heat.melt(id_vars="Service", var_name="Type", value_name="Rate")
-    fig = px.density_heatmap(melt, x="Type", y="Service", z="Rate",
-                             color_continuous_scale="tealrose", title="Average overrun rate by service")
+    fig = px.density_heatmap(
+        melt, x="Type", y="Service", z="Rate",
+        color_continuous_scale="tealrose", title="Average overrun rate by service"
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------
@@ -257,7 +265,7 @@ with tabs[5]:
         coef_df = pd.DataFrame({"Feature":X.columns,"Odds_Ratio":ors}).sort_values("Odds_Ratio",ascending=False)
         fig = px.bar(
             coef_df, x="Feature", y="Odds_Ratio",
-            color="Feature", color_discrete_sequence=px.colors.sequential.Tealgrn,
+            color="Feature", color_discrete_sequence=px.colors.qualitative.Vivid,
             title="Odds ratios for CM2% drop (↑ = higher risk)"
         )
         st.plotly_chart(fig, use_container_width=True)
