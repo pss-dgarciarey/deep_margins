@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from sklearn.metrics import confusion_matrix, roc_auc_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -27,6 +26,12 @@ def safe_num(x):
     try: return float(x)
     except: return np.nan
 
+def safe_int(v):
+    try:
+        return int(float(v))
+    except Exception:
+        return 0
+
 def wilson_ci(k, n, z=1.96):
     if n == 0: return (np.nan, np.nan)
     p = k/n
@@ -36,21 +41,29 @@ def wilson_ci(k, n, z=1.96):
     return (max(0, center - margin), min(1, center + margin))
 
 # ------------------------------------------------------------
-# Load data
+# Load data + sidebar filters
 # ------------------------------------------------------------
 uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
 if not uploaded:
-    st.info("Upload the updated 'Project List Main.xlsx'")
+    st.info("Upload your 'Project List Main.xlsx'")
     st.stop()
 
 df = pd.read_excel(uploaded, sheet_name=0, header=0)
 df.columns = [normalize(c) for c in df.columns]
+
+# Country selector
+countries = sorted(df["country"].dropna().unique()) if "country" in df.columns else []
+if countries:
+    selected_countries = st.sidebar.multiselect("Select countries to include:", countries, default=countries)
+    df = df[df["country"].isin(selected_countries)]
+else:
+    selected_countries = []
+
 st.sidebar.success("✅ File loaded successfully")
 
 # ------------------------------------------------------------
 # Derived metrics
 # ------------------------------------------------------------
-# Contract and margin info
 df["contract_value"] = pd.to_numeric(df.get("contract_value"), errors="coerce")
 df["cash_received"]  = pd.to_numeric(df.get("cash_received"), errors="coerce")
 df["cm2_forecast"]   = pd.to_numeric(df.get("cm2_forecast"), errors="coerce")
@@ -59,12 +72,10 @@ df["cm2pct_forecast"]= pd.to_numeric(df.get("cm2pct_forecast"), errors="coerce")
 df["cm2pct_actual"]  = pd.to_numeric(df.get("cm2pct_actual"), errors="coerce")
 df["check_v"]        = pd.to_numeric(df.get("check_v"), errors="coerce")
 
-# Basic totals
 total_contract = df["contract_value"].sum()
 total_cash     = df["cash_received"].sum()
 avg_pt         = pd.to_numeric(df.get("pt_(days)"), errors="coerce").mean()
 
-# Compounded forecast margin
 valid = df["contract_value"].notna() & df["cm2_forecast"].notna()
 if valid.any():
     weighted_fore_pct = (df.loc[valid, "cm2_forecast"].sum()/df.loc[valid,"contract_value"].sum())*100
@@ -83,21 +94,18 @@ weighted_real_pct = (df.loc[valid2,"cm2pct_real"]*df.loc[valid2,"contract_value"
 total_real_eur = df["cm2_actual"].sum()
 
 # ------------------------------------------------------------
-# Top KPIs
+# Top KPIs (no Realized Cash Ratio)
 # ------------------------------------------------------------
-col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 with col1: st.metric("Projects", df["project_id"].nunique())
 with col2: st.metric("Contract Value Σ (EUR)", f"{total_contract:,.0f}")
 with col3: st.metric("Cash Received Σ (EUR)", f"{total_cash:,.0f}")
 with col4: st.metric("Avg PT (days)", f"{avg_pt:.1f}")
 with col5: st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%", delta=f"{total_fore_eur:,.0f} €")
 with col6: st.metric("Real Compounded CM2% (Actual)", f"{weighted_real_pct:,.1f}%", delta=f"{total_real_eur:,.0f} €")
-with col7: 
-    realized_cash_ratio = total_cash / total_contract if total_contract else np.nan
-    st.metric("Realized Cash Ratio", f"{realized_cash_ratio*100:.1f}%")
 
 # ------------------------------------------------------------
-# Service-level long table
+# Build service table
 # ------------------------------------------------------------
 service_blocks = ["tpm","cpm","eng","qa_qc_exp","hse","constr","com"]
 svc_rows = []
@@ -106,21 +114,19 @@ for s in service_blocks:
         colname = f"{s}_{field}"
         if colname not in df.columns:
             df[colname] = np.nan
-    for _,r in df.iterrows():
+    for _, r in df.iterrows():
         svc_rows.append({
             "project_id": r.get("project_id"),
             "service": s.upper(),
             "budget": safe_num(r[f"{s}_budget"]),
             "forecast": safe_num(r[f"{s}_forecast"]),
             "actual": safe_num(r[f"{s}_actual"]),
-            "h_o": int(r.get(f"{s}_h_o",0) or 0),
-            "b_o": int(r.get(f"{s}_b_o",0) or 0),
-            "delay": int(r.get(f"{s}_delay",0) or 0)
+            "h_o": safe_int(r.get(f"{s}_h_o")),
+            "b_o": safe_int(r.get(f"{s}_b_o")),
+            "delay": safe_int(r.get(f"{s}_delay"))
         })
 svc = pd.DataFrame(svc_rows)
 svc["inflation"] = np.where(svc["budget"]>0, svc["actual"]/svc["budget"], np.nan)
-
-# Filter: exclude procurement & manufacturing entirely
 svc = svc[~svc["service"].isin(["PROC","MAN"])]
 
 # ------------------------------------------------------------
@@ -136,6 +142,7 @@ tabs = st.tabs([
 # ------------------------------------------------------------
 with tabs[0]:
     st.subheader("Portfolio overview")
+
     base_cols = ["contract_value","cash_received","total_o","total_delays","total_penalties","check_v"]
     df_num = df[[c for c in base_cols if c in df.columns]].apply(pd.to_numeric, errors="coerce")
     if not df_num.empty:
@@ -145,7 +152,8 @@ with tabs[0]:
 
     st.subheader("Margin distribution")
     fig = px.scatter(df, x="contract_value", y="cm2pct_actual",
-                     size="total_penalties", color="country" if "country" in df.columns else None,
+                     size="total_penalties" if "total_penalties" in df.columns else None,
+                     color="country" if "country" in df.columns else None,
                      color_discrete_sequence=px.colors.sequential.Teal,
                      title="Contract Value vs CM2% Actual (bubble = penalties)")
     st.plotly_chart(fig, use_container_width=True)
@@ -156,7 +164,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Internal Services Metrics")
 
-    # no penalties/delays for HSE, TPM, CPM
+    # No penalties/delays for HSE, TPM, CPM
     mask_delay = ~svc["service"].isin(["HSE","TPM","CPM"])
     svc.loc[~mask_delay, "delay"] = np.nan
 
