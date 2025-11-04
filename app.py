@@ -169,7 +169,7 @@ tabs = st.tabs(
 )
 
 # ------------------------------------------------------------
-# 1️⃣ Overview
+# 1️⃣ Overview (fixed visuals)
 # ------------------------------------------------------------
 with tabs[0]:
     st.subheader("Portfolio Overview")
@@ -184,45 +184,72 @@ with tabs[0]:
     else:
         st.info("No numeric fields available for correlation.")
 
-    # Bubble chart
-    st.subheader("Contract Value vs Penalties (bubble = CM2% Forecast)")
+    # =========================
+    # Bubble chart (fixed)
+    # =========================
+    st.subheader("Contract Value vs CM2% Forecast (bubble = penalties)")
     df_bubble = df.copy()
-    for col in ["contract_value", "total_penalties", "cm2pct_forecast"]:
+    for col in ["contract_value", "cm2pct_forecast", "total_penalties"]:
         if col in df_bubble.columns:
-            df_bubble[col] = pd.to_numeric(df_bubble[col], errors="coerce")
-    df_bubble = df_bubble.dropna(subset=["contract_value", "total_penalties", "cm2pct_forecast"])
+            df_bubble[col] = pd.to_numeric(df_bubble[col], errors="coerce").fillna(0)
+
+    df_bubble = df_bubble.dropna(subset=["contract_value", "cm2pct_forecast"])
     if not df_bubble.empty:
-        df_bubble["cm2pct_forecast_size"] = df_bubble["cm2pct_forecast"].abs().clip(lower=0.1)
+        df_bubble["total_penalties"] = df_bubble["total_penalties"].clip(lower=0)
+        df_bubble["has_penalty"] = df_bubble["total_penalties"] > 0
+
         fig = px.scatter(
             df_bubble,
             x="contract_value",
-            y="total_penalties",
-            size="cm2pct_forecast_size",
+            y="cm2pct_forecast",
+            size="total_penalties",
             color="country" if "country" in df_bubble.columns else None,
-            hover_data=[c for c in ["project_id", "customer", "cm2pct_forecast"] if c in df_bubble.columns],
+            hover_data=[c for c in ["project_id", "customer", "total_penalties", "cm2pct_forecast"] if c in df_bubble.columns],
             color_discrete_sequence=px.colors.qualitative.Set2,
-            title="Penalty distribution across projects",
-            size_max=60,
+            title="Penalty-weighted forecast margin distribution",
+            size_max=50
         )
-        fig.update_traces(marker=dict(line=dict(width=0.4, color="rgba(0,0,0,0.3)")))
-        fig.update_layout(xaxis_title="Contract Value (EUR)", yaxis_title="Number of Penalties")
+
+        # Different shapes for zero-penalty projects
+        fig.update_traces(
+            marker=dict(
+                symbol=[
+                    "square" if not p else "circle" for p in df_bubble["has_penalty"]
+                ],
+                line=dict(width=0.4, color="rgba(0,0,0,0.3)")
+            )
+        )
+
+        fig.update_layout(
+            xaxis_title="Contract Value (EUR)",
+            yaxis_title="CM2% Forecast",
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+        )
         st.plotly_chart(fig, use_container_width=True, config=plotly_config("penalty_bubble"))
     else:
         st.warning("No valid numeric rows for the bubble chart after cleaning.")
 
-    # Margin scatter
+    # =========================
+    # Margin scatter (fixed)
+    # =========================
     st.subheader("Margin Scatter")
-    mode = st.radio("Y-axis:", ["CM2% Actual", "Margin Δ (EUR)"], horizontal=True, key="margin_mode")
+    mode = st.radio(
+        "Y-axis:",
+        ["CM2% Forecast", "CM2 Forecast (EUR)"],
+        horizontal=True,
+        key="margin_mode",
+    )
     df_scatter = df.copy()
-    if "cm2_actual" in df_scatter.columns and "cm2_forecast" in df_scatter.columns:
-        df_scatter["margin_delta"] = df_scatter["cm2_actual"] - df_scatter["cm2_forecast"]
-    if mode == "CM2% Actual":
-        yaxis = "cm2pct_actual"
-        title = "Contract Value vs CM2% Actual"
+    if mode == "CM2% Forecast":
+        yaxis = "cm2pct_forecast"
+        title = "Contract Value vs CM2% Forecast"
     else:
-        yaxis = "margin_delta"
-        title = "Contract Value vs Margin Δ (EUR)"
+        yaxis = "cm2_forecast"
+        title = "Contract Value vs CM2 Forecast (EUR)"
+
     if yaxis in df_scatter.columns:
+        df_scatter[yaxis] = pd.to_numeric(df_scatter[yaxis], errors="coerce")
         fig2 = px.scatter(
             df_scatter,
             x="contract_value",
@@ -231,6 +258,12 @@ with tabs[0]:
             hover_data=[c for c in ["project_id", "customer"] if c in df_scatter.columns],
             color_discrete_sequence=px.colors.qualitative.Set2,
             title=title,
+        )
+        fig2.update_layout(
+            xaxis_title="Contract Value (EUR)",
+            yaxis_title=yaxis.replace("_", " ").title(),
+            plot_bgcolor="white",
+            paper_bgcolor="white",
         )
         st.plotly_chart(fig2, use_container_width=True, config=plotly_config("margin_scatter"))
     else:
