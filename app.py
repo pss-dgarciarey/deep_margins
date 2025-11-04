@@ -10,7 +10,7 @@ from sklearn.pipeline import Pipeline
 # ------------------------------------------------------------
 # Streamlit setup
 # ------------------------------------------------------------
-st.set_page_config(page_title="PSS Project Analytics", layout="wide")
+st.set_page_config(page_title="PSS Analytics Dashboard", layout="wide")
 st.title("📊 PSS Project Analytics")
 
 # ------------------------------------------------------------
@@ -46,8 +46,7 @@ def plotly_config(name: str):
         },
     }
 
-def find_col(df: pd.DataFrame, must_contain: list[str]):
-    """Return first column whose name contains all tokens in must_contain (case-insensitive)."""
+def find_col(df: pd.DataFrame, must_contain):
     tokens = [t.lower() for t in must_contain]
     for c in df.columns:
         lc = c.lower()
@@ -58,21 +57,17 @@ def find_col(df: pd.DataFrame, must_contain: list[str]):
 def is_binary_series(s: pd.Series) -> bool:
     if s.dropna().empty:
         return False
-    uniq = pd.unique(s.dropna().astype(float))
-    return np.all(np.isin(uniq, [0.0, 1.0]))
+    uniq = pd.unique(pd.to_numeric(s.dropna(), errors="coerce"))
+    uniq = uniq[~pd.isna(uniq)]
+    return len(uniq) > 0 and np.all(np.isin(uniq, [0.0, 1.0]))
 
 def to_flag(s: pd.Series, op: str, thr: float):
     s_num = pd.to_numeric(s, errors="coerce")
-    if op == "≥":
-        return (s_num >= thr).astype(int)
-    if op == ">":
-        return (s_num > thr).astype(int)
-    if op == "≤":
-        return (s_num <= thr).astype(int)
-    if op == "<":
-        return (s_num < thr).astype(int)
-    if op == "=":
-        return (s_num == thr).astype(int)
+    if op == "≥": return (s_num >= thr).astype(int)
+    if op == ">": return (s_num >  thr).astype(int)
+    if op == "≤": return (s_num <= thr).astype(int)
+    if op == "<": return (s_num <  thr).astype(int)
+    if op == "=": return (s_num == thr).astype(int)
     return (s_num > thr).astype(int)
 
 # ------------------------------------------------------------
@@ -112,7 +107,7 @@ for col in [
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
 # ------------------------------------------------------------
-# Compounded high-level metrics (kept as-is)
+# Compounded high-level metrics
 # ------------------------------------------------------------
 total_contract = df.get("contract_value", pd.Series(dtype=float)).sum()
 total_cash = df.get("cash_received", pd.Series(dtype=float)).sum()
@@ -120,19 +115,14 @@ weighted_fore_pct = (df.get("cm2_forecast", 0).sum() / total_contract * 100) if 
 weighted_real_pct = (df.get("cm2_actual", 0).sum() / total_contract * 100) if total_contract else 0
 
 col1, col2, col3, col4, col5 = st.columns(5)
-with col1:
-    st.metric("Projects", len(df))
-with col2:
-    st.metric("Contract Value Σ (EUR)", f"{total_contract:,.0f}")
-with col3:
-    st.metric("Cash Received Σ (EUR)", f"{total_cash:,.0f}")
-with col4:
-    st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%")
-with col5:
-    st.metric("Real Compounded CM2% (Actual)", f"{weighted_real_pct:,.1f}%")
+with col1: st.metric("Projects", len(df))
+with col2: st.metric("Contract Value Σ (EUR)", f"{total_contract:,.0f}")
+with col3: st.metric("Cash Received Σ (EUR)", f"{total_cash:,.0f}")
+with col4: st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%")
+with col5: st.metric("Real Compounded CM2% (Actual)", f"{weighted_real_pct:,.1f}%")
 
 # ------------------------------------------------------------
-# Build service-level long table from canonical columns (hours/budget/delays)
+# Build service-level table (hours/budget/delay)
 # ------------------------------------------------------------
 service_blocks = ["tpm", "cpm", "eng", "qa_qc_exp", "hse", "constr", "com", "man", "proc"]
 svc_rows = []
@@ -157,15 +147,9 @@ svc = pd.DataFrame(svc_rows)
 svc["inflation"] = np.where(svc["budget"] > 0, svc["actual"] / svc["budget"], np.nan)
 
 pretty = {
-    "TPM": "TPM",
-    "CPM": "CPM",
-    "ENG": "Engineering",
-    "QA_QC_EXP": "QA/QC/Exp",
-    "HSE": "HSE",
-    "CONSTR": "Construction",
-    "COM": "Commissioning",
-    "MAN": "Manufacturing",
-    "PROC": "Procurement",
+    "TPM": "TPM", "CPM": "CPM", "ENG": "Engineering", "QA_QC_EXP": "QA/QC/Exp",
+    "HSE": "HSE", "CONSTR": "Construction", "COM": "Commissioning",
+    "MAN": "Manufacturing", "PROC": "Procurement",
 }
 
 # ------------------------------------------------------------
@@ -182,7 +166,7 @@ tabs = st.tabs([
 with tabs[0]:
     st.subheader("Portfolio Overview")
 
-    # Correlation Heatmap (include overruns; drop all-NaN columns)
+    # Correlation Heatmap
     heat_cols = [c for c in [
         "contract_value", "cash_received",
         "cm2_budget", "cm2_forecast", "cm2_actual",
@@ -192,14 +176,12 @@ with tabs[0]:
     df_num = df[heat_cols].apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
     if not df_num.empty and df_num.shape[1] > 1:
         corr = df_num.corr("spearman")
-        fig = px.imshow(
-            corr, text_auto=".2f", aspect="auto",
-            color_continuous_scale="tealrose",
-            title="Correlation heatmap (incl. hours & budget overruns)"
-        )
+        fig = px.imshow(corr, text_auto=".2f", aspect="auto",
+                        color_continuous_scale="tealrose",
+                        title="Correlation heatmap (incl. hours & budget overruns)")
         st.plotly_chart(fig, use_container_width=True, config=plotly_config("correlation_heatmap"))
 
-    # Bubble chart: X=CV, Y=CM2% Forecast, size=penalties (0 → square)
+    # Bubble chart
     st.subheader("Contract Value vs CM2% Forecast (bubble = penalties)")
     df_bubble = df.copy()
     for c in ["contract_value", "cm2pct_forecast", "total_penalties"]:
@@ -209,13 +191,11 @@ with tabs[0]:
     if not df_bubble.empty:
         df_bubble["has_penalty"] = df_bubble["total_penalties"] > 0
         fig = px.scatter(
-            df_bubble,
-            x="contract_value", y="cm2pct_forecast",
+            df_bubble, x="contract_value", y="cm2pct_forecast",
             size="total_penalties",
             color="country" if "country" in df_bubble.columns else None,
             hover_data=[c for c in ["project_id", "customer", "total_penalties", "cm2pct_forecast"] if c in df_bubble.columns],
-            color_discrete_sequence=px.colors.qualitative.Set2,
-            size_max=50
+            color_discrete_sequence=px.colors.qualitative.Set2, size_max=50
         )
         fig.update_traces(marker=dict(
             symbol=["square" if not p else "circle" for p in df_bubble["has_penalty"]],
@@ -224,7 +204,7 @@ with tabs[0]:
         fig.update_layout(xaxis_title="Contract Value (EUR)", yaxis_title="CM2% Forecast")
         st.plotly_chart(fig, use_container_width=True, config=plotly_config("penalty_bubble"))
 
-    # Margin Scatter: X=CV, Y switch between CM2% Forecast and CM2 Forecast (EUR)
+    # Margin Scatter
     st.subheader("Margin Scatter")
     mode = st.radio("Y-axis:", ["CM2% Forecast", "CM2 Forecast (EUR)"], horizontal=True, key="scatter_y")
     yaxis = "cm2pct_forecast" if mode == "CM2% Forecast" else "cm2_forecast"
@@ -282,37 +262,27 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Real CM2% Deviation")
 
-    # Try to locate a precomputed "real CM2% deviation" column from Excel
-    real_dev_col = (
-        find_col(df, ["real", "cm2", "pct", "dev"]) or
-        find_col(df, ["cm2pct", "real", "dev"]) or
-        find_col(df, ["real", "cm2pct"])  # fallback if named like cm2pct_real
-    )
-
-    eur_delta_col = (
-        find_col(df, ["cm2", "eur", "dev"]) or
-        find_col(df, ["delta", "cm2"]) or
-        find_col(df, ["cm2", "eur", "delta"])
-    )
-
-    # As last resort, derive EUR delta just for hover (forecast - budget)
-    if eur_delta_col is None and {"cm2_forecast", "cm2_budget"} <= set(df.columns):
+    real_dev_col = (find_col(df, ["real","cm2","pct","dev"]) or
+                    find_col(df, ["cm2pct","real","dev"]) or
+                    find_col(df, ["cm2pct","real"]))
+    eur_delta_col = (find_col(df, ["cm2","eur","dev"]) or
+                     find_col(df, ["delta","cm2"]) or
+                     find_col(df, ["cm2","eur","delta"]))
+    if eur_delta_col is None and {"cm2_forecast","cm2_budget"} <= set(df.columns):
         df["_cm2_eur_delta_tmp_"] = df["cm2_forecast"] - df["cm2_budget"]
         eur_delta_col = "_cm2_eur_delta_tmp_"
 
     if real_dev_col is None:
         st.warning("Could not find a precomputed 'Real CM2% Deviation' column in the file.")
     else:
-        bridge = df[[c for c in ["project_id", "customer", real_dev_col, eur_delta_col] if c in df.columns]].copy()
+        bridge = df[[c for c in ["project_id","customer", real_dev_col, eur_delta_col] if c in df.columns]].copy()
         bridge = bridge.dropna(subset=[real_dev_col])
         if not bridge.empty:
             fig4 = px.bar(
-                bridge,
-                x="project_id",
-                y=real_dev_col,
+                bridge, x="project_id", y=real_dev_col,
                 color=np.where(bridge[real_dev_col] > 0, "Positive", "Negative"),
                 hover_data=[c for c in ["customer", eur_delta_col] if c in bridge.columns],
-                color_discrete_sequence=["#7fc8a9", "#e07a5f"],
+                color_discrete_sequence=["#7fc8a9","#e07a5f"],
                 title="Real CM2% Deviation (hover shows € delta)"
             )
             fig4.update_layout(xaxis_title="Project", yaxis_title="Real CM2% Δ")
@@ -321,111 +291,176 @@ with tabs[2]:
             st.info("No data available for Real CM2% Deviation.")
 
 # ------------------------------------------------------------
-# 4) Probabilities (replaces Forecast Accuracy)
+# 4) Probabilities (SENTENCE UI)
 # ------------------------------------------------------------
 with tabs[3]:
     st.subheader("Probabilities")
 
-    # Choose TARGET of "negative margin" event (default: real CM2% deviation < 0 if exists)
-    default_target_col = (
-        find_col(df, ["real", "cm2", "pct", "dev"]) or
-        find_col(df, ["cm2pct", "real", "dev"]) or
-        find_col(df, ["cm2pct", "forecast"])  # fallback
-    )
+    # Outcome for "negative margin"
+    default_target_col = (find_col(df, ["real","cm2","pct","dev"]) or
+                          find_col(df, ["cm2pct","real","dev"]) or
+                          find_col(df, ["cm2pct","forecast"]))
     target_choices = [c for c in df.columns if "cm2" in c and "pct" in c]
-    target_col = st.selectbox("Outcome metric for 'negative margin' (choose what < 0 means negative)", target_choices, index=target_choices.index(default_target_col) if default_target_col in target_choices else 0)
-    target_flag = (pd.to_numeric(df[target_col], errors="coerce") < 0).astype(int)
-
-    st.markdown("##### A) P( Negative margin | 1–2 conditions )")
-    # Condition 1
-    cond1_col = st.selectbox("Condition 1 column", df.columns, key="p_cond1")
-    if is_binary_series(pd.to_numeric(df[cond1_col], errors="coerce")):
-        cond1_val = st.selectbox("Cond 1 equals", ["Yes (1)", "No (0)"], key="p_cond1_val")
-        cond1_flag = (pd.to_numeric(df[cond1_col], errors="coerce") == (1 if "Yes" in cond1_val else 0))
+    if not target_choices:
+        st.info("No CM2% columns found for probability sentences.")
     else:
-        c1_op = st.selectbox("Cond 1 operator", ["≥", ">", "≤", "<", "="], key="p_c1op")
-        c1_thr = st.number_input("Cond 1 threshold", value=0.0, step=1.0, key="p_c1thr")
-        cond1_flag = to_flag(df[cond1_col], c1_op, c1_thr) == 1
+        target_col = st.selectbox(
+            "Outcome metric that defines 'negative margin' (< 0):",
+            target_choices,
+            index=target_choices.index(default_target_col) if default_target_col in target_choices else 0,
+            key="prob_target_col"
+        )
+        target_flag = (pd.to_numeric(df[target_col], errors="coerce") < 0).astype(int)
 
-    # Condition 2 (optional)
-    use_cond2 = st.checkbox("Add Condition 2", value=False, key="p_use_c2")
-    if use_cond2:
-        cond2_col = st.selectbox("Condition 2 column", df.columns, key="p_cond2")
-        if is_binary_series(pd.to_numeric(df[cond2_col], errors="coerce")):
-            cond2_val = st.selectbox("Cond 2 equals", ["Yes (1)", "No (0)"], key="p_cond2_val")
-            cond2_flag = (pd.to_numeric(df[cond2_col], errors="coerce") == (1 if "Yes" in cond2_val else 0))
+        st.markdown("### A) Probability of **negative margin** given conditions")
+        left, right = st.columns(2)
+
+        # Condition 1
+        with left:
+            cond1_col = st.selectbox("Condition 1", df.columns, key="cond1_col")
+            c1_series = df[cond1_col]
+            if is_binary_series(pd.to_numeric(c1_series, errors="coerce")):
+                cond1_is_flag = True
+                cond1_val = st.selectbox("is", ["Yes (1)", "No (0)"], key="cond1_flag_val")
+                cond1_mask = (pd.to_numeric(c1_series, errors="coerce") == (1 if "Yes" in cond1_val else 0))
+                cond1_desc = f"{cond1_col} = {'Yes' if 'Yes' in cond1_val else 'No'}"
+            else:
+                cond1_is_flag = False
+                c1_op = st.selectbox("operator", ["≥", ">", "≤", "<", "="], key="cond1_op")
+                c1_thr = st.number_input("threshold", value=0.0, step=1.0, key="cond1_thr")
+                cond1_mask = (to_flag(c1_series, c1_op, c1_thr) == 1)
+                cond1_desc = f"{cond1_col} {c1_op} {c1_thr}"
+
+        # Condition 2 (optional)
+        with right:
+            use_cond2 = st.checkbox("Add Condition 2", value=False, key="use_cond2")
+            logic = st.radio("Logic", ["AND", "OR"], horizontal=True, key="cond_logic")
+            if use_cond2:
+                cond2_col = st.selectbox("Condition 2", df.columns, key="cond2_col")
+                c2_series = df[cond2_col]
+                if is_binary_series(pd.to_numeric(c2_series, errors="coerce")):
+                    cond2_is_flag = True
+                    cond2_val = st.selectbox("is", ["Yes (1)", "No (0)"], key="cond2_flag_val")
+                    cond2_mask = (pd.to_numeric(c2_series, errors="coerce") == (1 if "Yes" in cond2_val else 0))
+                    cond2_desc = f"{cond2_col} = {'Yes' if 'Yes' in cond2_val else 'No'}"
+                else:
+                    cond2_is_flag = False
+                    c2_op = st.selectbox("operator", ["≥", ">", "≤", "<", "="], key="cond2_op")
+                    c2_thr = st.number_input("threshold", value=0.0, step=1.0, key="cond2_thr")
+                    cond2_mask = (to_flag(c2_series, c2_op, c2_thr) == 1)
+                    cond2_desc = f"{cond2_col} {c2_op} {c2_thr}"
+            else:
+                cond2_mask = pd.Series([True]*len(df), index=df.index)
+                cond2_desc = "None"
+
+        if use_cond2 and logic == "OR":
+            mask = cond1_mask | cond2_mask
+            cond_text = f"{cond1_desc} **OR** {cond2_desc}"
         else:
-            c2_op = st.selectbox("Cond 2 operator", ["≥", ">", "≤", "<", "="], key="p_c2op")
-            c2_thr = st.number_input("Cond 2 threshold", value=0.0, step=1.0, key="p_c2thr")
-            cond2_flag = to_flag(df[cond2_col], c2_op, c2_thr) == 1
-    else:
-        cond2_flag = pd.Series([True] * len(df), index=df.index)
+            mask = cond1_mask & cond2_mask
+            cond_text = cond1_desc if not use_cond2 else f"{cond1_desc} **AND** {cond2_desc}"
 
-    mask = cond1_flag & cond2_flag
-    if mask.sum() > 0:
-        prob = target_flag[mask].mean() * 100
-        st.success(f"Estimated P(negative margin | conditions) = **{prob:.1f}%**  (n={mask.sum()})")
-    else:
-        st.info("No rows satisfy the chosen conditions.")
+        if mask.sum() > 0:
+            prob = target_flag[mask].mean() * 100
+            st.success(f"**Probability of a project ending with negative margin if {cond_text} = {prob:.1f}%**  (n={mask.sum()})")
+        else:
+            st.info("No rows satisfy the chosen conditions.")
 
-    st.markdown("##### B) P( numeric var is higher/lower than threshold | flag ) and reverse")
-    num_col = st.selectbox("Numeric variable", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], key="p_num")
-    comp = st.selectbox("Compare", ["≥", ">", "≤", "<", "="], key="p_numcomp")
-    thr = st.number_input("Threshold", value=0.0, step=1.0, key="p_numthr")
-    flag_col = st.selectbox("Flag variable (0/1)", [c for c in df.columns if is_binary_series(pd.to_numeric(df[c], errors="coerce"))], key="p_flag")
+        st.divider()
+        st.markdown("### B) Numeric ↔ Flag conditional probabilities (and reverse)")
 
-    num_flag = to_flag(df[num_col], comp, thr)
-    flag_ser = pd.to_numeric(df[flag_col], errors="coerce").fillna(0).astype(int)
+        # Pick numeric var and flag var
+        numeric_candidates = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        flag_candidates = [c for c in df.columns if is_binary_series(pd.to_numeric(df[c], errors="coerce"))]
+        # Add derived penalty flag as a convenience if available
+        if "total_penalties" in df.columns and "penalty_flag" not in df.columns:
+            df["penalty_flag"] = (pd.to_numeric(df["total_penalties"], errors="coerce").fillna(0) > 0).astype(int)
+            flag_candidates.append("penalty_flag")
 
-    # P(num_condition | flag=1)
-    m1 = flag_ser == 1
-    if m1.sum() > 0:
-        p_num_given_flag = num_flag[m1].mean() * 100
-        st.success(f"P({num_col} {comp} {thr} | {flag_col}=1) = **{p_num_given_flag:.1f}%**  (n={m1.sum()})")
-    else:
-        st.info("No rows with flag=1 for the chosen flag variable.")
+        num_col = st.selectbox("Numeric variable", numeric_candidates, key="b_num")
+        comp = st.selectbox("Compare", ["≥", ">", "≤", "<", "="], key="b_comp")
+        thr = st.number_input("Threshold", value=0.0, step=1.0, key="b_thr")
+        flag_col = st.selectbox("Flag variable (0/1)", flag_candidates, key="b_flag")
 
-    # Reverse: P(flag=1 | num_condition)
-    m2 = num_flag == 1
-    if m2.sum() > 0:
-        p_flag_given_num = flag_ser[m2].mean() * 100
-        st.success(f"P({flag_col}=1 | {num_col} {comp} {thr}) = **{p_flag_given_num:.1f}%**  (n={m2.sum()})")
-    else:
-        st.info("No rows match the numeric condition.")
+        num_flag = to_flag(df[num_col], comp, thr)
+        flag_ser = pd.to_numeric(df[flag_col], errors="coerce").fillna(0).astype(int)
 
-    st.markdown("##### C) P( flag variable | numeric variable converted to flag )")
-    tgt_flag_col = st.selectbox("Target flag", [c for c in df.columns if is_binary_series(pd.to_numeric(df[c], errors="coerce"))], key="p_tgtflag")
-    conv_num_col = st.selectbox("Numeric to convert → flag", [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])], key="p_convnum")
-    conv_op = st.selectbox("Operator", ["≥", ">", "≤", "<", "="], key="p_convop")
-    conv_thr = st.number_input("Threshold for numeric→flag", value=0.0, step=1.0, key="p_convthr")
+        mask_flag1 = flag_ser == 1
+        if mask_flag1.sum() > 0:
+            p1 = num_flag[mask_flag1].mean() * 100
+            st.success(f"**P({num_col} {comp} {thr} | {flag_col}=1) = {p1:.1f}%**  (n={mask_flag1.sum()})")
+        else:
+            st.info(f"No rows with {flag_col}=1.")
 
-    conv_flag = to_flag(df[conv_num_col], conv_op, conv_thr)
-    tgt_ser = pd.to_numeric(df[tgt_flag_col], errors="coerce").fillna(0).astype(int)
-    m3 = conv_flag == 1
-    if m3.sum() > 0:
-        p_tgt_given_conv = tgt_ser[m3].mean() * 100
-        st.success(f"P({tgt_flag_col}=1 | {conv_num_col} {conv_op} {conv_thr}) = **{p_tgt_given_conv:.1f}%**  (n={m3.sum()})")
-    else:
-        st.info("No rows match the numeric→flag condition.")
+        mask_num1 = num_flag == 1
+        if mask_num1.sum() > 0:
+            p2 = flag_ser[mask_num1].mean() * 100
+            st.success(f"**P({flag_col}=1 | {num_col} {comp} {thr}) = {p2:.1f}%**  (n={mask_num1.sum()})")
+        else:
+            st.info(f"No rows where {num_col} {comp} {thr}.")
 
-    # Quick stats
-    st.markdown("##### Averages & medians")
-    stats_cols = [c for c in ["total_penalties", "total_delays", "total_o"] if c in df.columns]
-    if stats_cols:
-        agg = pd.DataFrame({
-            "mean": df[stats_cols].mean(numeric_only=True),
-            "median": df[stats_cols].median(numeric_only=True),
-        })
-        st.dataframe(agg.style.format({"mean": "{:.2f}", "median": "{:.2f}"}), use_container_width=True)
-    else:
-        st.info("No standard penalty/delay/overrun totals found for summary.")
+        st.divider()
+        st.markdown("### C) Flag | Numeric→Flag transformation")
+
+        tgt_flag_col = st.selectbox("Target flag", flag_candidates, key="c_tgt")
+        conv_num_col = st.selectbox("Numeric to convert → flag", numeric_candidates, key="c_num")
+        conv_op = st.selectbox("Operator", ["≥", ">", "≤", "<", "="], key="c_op")
+        conv_thr = st.number_input("Threshold", value=0.0, step=1.0, key="c_thr")
+
+        conv_flag = to_flag(df[conv_num_col], conv_op, conv_thr)
+        tgt_ser = pd.to_numeric(df[tgt_flag_col], errors="coerce").fillna(0).astype(int)
+        m3 = conv_flag == 1
+        if m3.sum() > 0:
+            p3 = tgt_ser[m3].mean() * 100
+            st.success(f"**P({tgt_flag_col}=1 | {conv_num_col} {conv_op} {conv_thr}) = {p3:.1f}%**  (n={m3.sum()})")
+        else:
+            st.info("No rows match the numeric→flag condition.")
+
+        st.divider()
+        st.markdown("#### Quick presets")
+        colp1, colp2, colp3 = st.columns(3)
+        with colp1:
+            if st.button("P(neg. margin | ENG delay=Yes)", use_container_width=True):
+                st.session_state["cond1_col"] = "eng_delay" if "eng_delay" in df.columns else next((c for c in df.columns if "eng" in c and "delay" in c), df.columns[0])
+                st.session_state["cond1_flag_val"] = "Yes (1)"
+                st.session_state["use_cond2"] = False
+        with colp2:
+            if st.button("P(neg. margin | CONSTR b_o>0 AND CPM h_o>0)", use_container_width=True):
+                st.session_state["cond1_col"] = "constr_b_o" if "constr_b_o" in df.columns else next((c for c in df.columns if "constr" in c and "b_o" in c), df.columns[0])
+                st.session_state["cond1_op"] = ">"
+                st.session_state["cond1_thr"] = 0.0
+                st.session_state["use_cond2"] = True
+                st.session_state["cond_logic"] = "AND"
+                st.session_state["cond2_col"] = "cpm_h_o" if "cpm_h_o" in df.columns else next((c for c in df.columns if "cpm" in c and "h_o" in c), df.columns[0])
+                st.session_state["cond2_op"] = ">"
+                st.session_state["cond2_thr"] = 0.0
+        with colp3:
+            if st.button("P(penalty=1 | PROC delay=Yes)", use_container_width=True):
+                if "penalty_flag" not in df.columns and "total_penalties" in df.columns:
+                    df["penalty_flag"] = (pd.to_numeric(df["total_penalties"], errors="coerce").fillna(0) > 0).astype(int)
+                st.session_state["prob_target_col"] = target_col  # leave outcome metric as chosen
+                st.session_state["b_num"] = "total_penalties" if "total_penalties" in df.columns else numeric_candidates[0]
+                st.session_state["b_comp"] = ">"
+                st.session_state["b_thr"] = 0.0
+                st.session_state["b_flag"] = "proc_delay" if "proc_delay" in df.columns else next((c for c in df.columns if "proc" in c and "delay" in c), flag_candidates[0])
+
+        st.divider()
+        st.markdown("#### Averages & medians")
+        stats_cols = [c for c in ["total_penalties", "total_delays", "total_o"] if c in df.columns]
+        if stats_cols:
+            agg = pd.DataFrame({
+                "mean": df[stats_cols].mean(numeric_only=True),
+                "median": df[stats_cols].median(numeric_only=True),
+            })
+            st.dataframe(agg.style.format({"mean": "{:.2f}", "median": "{:.2f}"}), use_container_width=True)
+        else:
+            st.info("No standard penalty/delay/overrun totals found for summary.")
 
 # ------------------------------------------------------------
 # 5) Overrun Heatmap
 # ------------------------------------------------------------
 with tabs[4]:
     st.subheader("Overrun & Delay density heatmap")
-    # Exclude Man & Proc in plots
     svc_filtered = svc[~svc["service"].isin(["MAN", "PROC"])]
     heat = svc_filtered.groupby("service")[["h_o", "b_o", "delay"]].mean().reset_index()
     heat["Service"] = heat["service"].map(pretty)
@@ -443,22 +478,19 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Drivers of CM2% deviation (service-level)")
 
-    # Target: negative deviation based on precomputed real CM2% deviation if present; otherwise fall back to (forecast - budget)
-    real_dev_col = (
-        find_col(df, ["real", "cm2", "pct", "dev"]) or
-        find_col(df, ["cm2pct", "real", "dev"]) or
-        ( "cm2pct_forecast" if "cm2pct_forecast" in df.columns else None )
-    )
+    real_dev_col = (find_col(df, ["real","cm2","pct","dev"]) or
+                    find_col(df, ["cm2pct","real","dev"]) or
+                    find_col(df, ["cm2pct","forecast"]))
     if real_dev_col is None:
         st.warning("No suitable CM2% deviation/real column found.")
     else:
         y = (pd.to_numeric(df[real_dev_col], errors="coerce") < 0).astype(int)
 
-        # Build per-service binary features: any budget overrun / hours overrun / delay
+        # Build per-service binary features
         feat_cols = []
         feat_df = pd.DataFrame(index=df.index)
         for s in service_blocks:
-            for suffix, label in [("b_o", "budget_overrun"), ("h_o", "hours_overrun"), ("delay", "delay")]:
+            for suffix, label in [("b_o","budget_overrun"), ("h_o","hours_overrun"), ("delay","delay")]:
                 col = f"{s}_{suffix}"
                 if col in df.columns:
                     fcol = f"{s}_{suffix}_flag"
@@ -474,23 +506,20 @@ with tabs[5]:
             coefs = pipe.named_steps["clf"].coef_[0]
             odds = np.exp(coefs)
 
-            # 1) Feature odds ratios
             feature_table = pd.DataFrame({
-                "Feature": [f for f, _, _ in feat_cols],
+                "Feature": [f for f,_,_ in feat_cols],
                 "Odds_Ratio": odds,
-                "Service": [srv for _, srv, _ in feat_cols],
-                "Type": [typ for _, _, typ in feat_cols],
+                "Service": [srv for _,srv,_ in feat_cols],
+                "Type": [typ for _,_,typ in feat_cols],
             }).sort_values("Odds_Ratio", ascending=False)
 
             fig7 = px.bar(
-                feature_table,
-                x="Feature", y="Odds_Ratio", color="Type",
+                feature_table, x="Feature", y="Odds_Ratio", color="Type",
                 color_discrete_sequence=px.colors.qualitative.Set2,
                 title="Odds ratios by overrun/delay flag (↑ = higher risk of negative margin)"
             )
             st.plotly_chart(fig7, use_container_width=True, config=plotly_config("drivers_features"))
 
-            # 2) Aggregate by service: impact score = sum of |log-odds|
             feature_table["Impact"] = np.abs(np.log(feature_table["Odds_Ratio"].replace(0, np.nan))).fillna(0)
             service_impact = feature_table.groupby("Service")["Impact"].sum().reset_index().sort_values("Impact", ascending=False)
             fig8 = px.bar(
