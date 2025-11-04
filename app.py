@@ -174,15 +174,48 @@ tabs = st.tabs(
 with tabs[0]:
     st.subheader("Portfolio Overview")
 
-    # Correlation heatmap
-    base_cols = [c for c in ["contract_value", "cash_received", "cm2_forecast", "cm2_actual", "total_penalties"] if c in df.columns]
-    df_num = df[base_cols].apply(pd.to_numeric, errors="coerce") if base_cols else pd.DataFrame()
-    if not df_num.empty:
-        corr = df_num.corr("spearman")
-        fig = px.imshow(corr, color_continuous_scale="tealrose", aspect="auto", title="Correlation heatmap")
-        st.plotly_chart(fig, use_container_width=True, config=plotly_config("correlation_heatmap"))
+    # =========================
+    # Correlation heatmap (extended)
+    # =========================
+    st.subheader("Correlation Heatmap")
+
+    # Collect only relevant numeric columns that exist and are non-empty
+    heat_cols = [
+        "contract_value", "cash_received",
+        "cm2_forecast", "cm2_actual",
+        "total_penalties", "total_o", "total_delays"
+    ]
+    existing = [c for c in heat_cols if c in df.columns]
+
+    if existing:
+        df_num = df[existing].apply(pd.to_numeric, errors="coerce")
+
+        # Drop columns that are entirely NaN (e.g., Man hours)
+        df_num = df_num.dropna(axis=1, how="all")
+
+        # Drop rows with all NaN (to clean sparse data)
+        df_num = df_num.dropna(how="all")
+
+        if not df_num.empty and df_num.shape[1] > 1:
+            corr = df_num.corr(method="spearman")
+
+            fig = px.imshow(
+                corr,
+                text_auto=".2f",
+                aspect="auto",
+                color_continuous_scale="tealrose",
+                title="Correlation heatmap (incl. hours & budget overruns)"
+            )
+            fig.update_layout(
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                margin=dict(l=60, r=20, t=60, b=40)
+            )
+            st.plotly_chart(fig, use_container_width=True, config=plotly_config("correlation_heatmap"))
+        else:
+            st.info("Not enough numeric data available for a correlation heatmap.")
     else:
-        st.info("No numeric fields available for correlation.")
+        st.info("No relevant columns found for correlation analysis.")
 
     # =========================
     # Bubble chart (fixed)
