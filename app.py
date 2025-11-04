@@ -138,20 +138,36 @@ with tabs[0]:
         fig = px.imshow(corr, color_continuous_scale="tealrose", aspect="auto", title="Correlation heatmap")
         st.plotly_chart(fig, use_container_width=True)
 
-    # Bubble chart
+    # Bubble chart (fully safe)
     st.subheader("Contract Value vs Penalties (bubble = CM2% Forecast)")
-    fig = px.scatter(
-        df,
-        x="contract_value",
-        y="total_penalties",
-        size="cm2pct_forecast",
-        color="country" if "country" in df.columns else None,
-        hover_data=["project_id","customer"] if "customer" in df.columns else ["project_id"],
-        color_discrete_sequence=px.colors.qualitative.Vivid,
-        title="Penalty distribution across projects"
-    )
-    fig.update_traces(marker=dict(line=dict(width=0.5, color="rgba(0,0,0,0.4)")))
-    st.plotly_chart(fig, use_container_width=True)
+
+    # Ensure numeric types, drop empty rows
+    df_bubble = df.copy()
+    for col in ["contract_value", "total_penalties", "cm2pct_forecast"]:
+        df_bubble[col] = pd.to_numeric(df_bubble.get(col), errors="coerce")
+
+    df_bubble = df_bubble.dropna(subset=["contract_value", "total_penalties", "cm2pct_forecast"])
+    if df_bubble.empty:
+        st.warning("No valid numeric data found for bubble chart.")
+    else:
+        fig = px.scatter(
+            df_bubble,
+            x="contract_value",
+            y="total_penalties",
+            size="cm2pct_forecast",
+            color="country" if "country" in df.columns else None,
+            hover_data=["project_id","customer"] if "customer" in df.columns else ["project_id"],
+            color_discrete_sequence=px.colors.qualitative.Safe,
+            title="Penalty distribution across projects"
+        )
+        fig.update_traces(marker=dict(line=dict(width=0.4, color="rgba(0,0,0,0.3)")))
+        fig.update_layout(
+            xaxis_title="Contract Value (EUR)",
+            yaxis_title="Number of Penalties",
+            plot_bgcolor="white",
+            paper_bgcolor="white"
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------
 # 2️⃣ Internal Services Metrics
