@@ -15,16 +15,19 @@ st.set_page_config(page_title="PSS Analytics Dashboard", layout="wide")
 st.title("📊 PSS Project Analytics")
 
 # ------------------------------------------------------------
-# Utility helpers
+# Helpers
 # ------------------------------------------------------------
 def normalize(c):
     c = str(c).strip().replace(" ", "_").replace("/", "_").replace("-", "_").replace("%", "pct")
-    while "__" in c: c = c.replace("__", "_")
+    while "__" in c:
+        c = c.replace("__", "_")
     return c.lower()
 
 def safe_num(x):
-    try: return float(x)
-    except: return np.nan
+    try:
+        return float(x)
+    except Exception:
+        return np.nan
 
 def safe_int(v):
     try:
@@ -32,20 +35,12 @@ def safe_int(v):
     except Exception:
         return 0
 
-def wilson_ci(k, n, z=1.96):
-    if n == 0: return (np.nan, np.nan)
-    p = k/n
-    denom = 1+z**2/n
-    center = (p + z**2/(2*n)) / denom
-    margin = z * math.sqrt((p*(1-p) + z**2/(4*n))/n) / denom
-    return (max(0, center - margin), min(1, center + margin))
-
 # ------------------------------------------------------------
-# Load data + sidebar filters
+# Load + Filters
 # ------------------------------------------------------------
 uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
 if not uploaded:
-    st.info("Upload your 'Project List Main.xlsx'")
+    st.info("Upload your latest 'Project List Main.xlsx'")
     st.stop()
 
 df = pd.read_excel(uploaded, sheet_name=0, header=0)
@@ -54,15 +49,19 @@ df.columns = [normalize(c) for c in df.columns]
 # Country selector
 countries = sorted(df["country"].dropna().unique()) if "country" in df.columns else []
 if countries:
-    selected_countries = st.sidebar.multiselect("Select countries to include:", countries, default=countries)
+    selected_countries = st.sidebar.multiselect("Select countries:", countries, default=countries)
     df = df[df["country"].isin(selected_countries)]
-else:
-    selected_countries = []
 
-st.sidebar.success("✅ File loaded successfully")
+# Customer selector
+customers = sorted(df["customer"].dropna().unique()) if "customer" in df.columns else []
+if customers:
+    selected_customers = st.sidebar.multiselect("Select customers:", customers, default=customers)
+    df = df[df["customer"].isin(selected_customers)]
+
+st.sidebar.success(f"✅ {len(df)} projects loaded after filters")
 
 # ------------------------------------------------------------
-# Derived metrics
+# Derived fields
 # ------------------------------------------------------------
 df["contract_value"] = pd.to_numeric(df.get("contract_value"), errors="coerce")
 df["cash_received"]  = pd.to_numeric(df.get("cash_received"), errors="coerce")
@@ -70,50 +69,40 @@ df["cm2_forecast"]   = pd.to_numeric(df.get("cm2_forecast"), errors="coerce")
 df["cm2_actual"]     = pd.to_numeric(df.get("cm2_actual"), errors="coerce")
 df["cm2pct_forecast"]= pd.to_numeric(df.get("cm2pct_forecast"), errors="coerce")
 df["cm2pct_actual"]  = pd.to_numeric(df.get("cm2pct_actual"), errors="coerce")
-df["check_v"]        = pd.to_numeric(df.get("check_v"), errors="coerce")
 
+# Weighted & real margins
 total_contract = df["contract_value"].sum()
 total_cash     = df["cash_received"].sum()
-avg_pt         = pd.to_numeric(df.get("pt_(days)"), errors="coerce").mean()
-
 valid = df["contract_value"].notna() & df["cm2_forecast"].notna()
-if valid.any():
-    weighted_fore_pct = (df.loc[valid, "cm2_forecast"].sum()/df.loc[valid,"contract_value"].sum())*100
-    total_fore_eur = df.loc[valid, "cm2_forecast"].sum()
-else:
-    weighted_fore_pct = np.nan
-    total_fore_eur = np.nan
+weighted_fore_pct = (df.loc[valid, "cm2_forecast"].sum()/df.loc[valid,"contract_value"].sum())*100 if valid.any() else np.nan
+total_fore_eur = df.loc[valid, "cm2_forecast"].sum() if valid.any() else np.nan
 
-# Real compounded “margin-eating” logic
 cm2p_fore = df["cm2pct_forecast"].fillna(0)
 cm2p_act  = df["cm2pct_actual"].fillna(0)
-real_adj  = [f + (a-f)*2 if (a-f)<0 else f+(a-f) for f,a in zip(cm2p_fore,cm2p_act)]
-df["cm2pct_real"] = real_adj
+df["cm2pct_real"] = [f + (a-f)*2 if (a-f)<0 else f+(a-f) for f,a in zip(cm2p_fore,cm2p_act)]
 valid2 = df["contract_value"].notna()
 weighted_real_pct = (df.loc[valid2,"cm2pct_real"]*df.loc[valid2,"contract_value"]).sum()/df.loc[valid2,"contract_value"].sum()
 total_real_eur = df["cm2_actual"].sum()
 
 # ------------------------------------------------------------
-# Top KPIs (no Realized Cash Ratio)
+# KPIs (removed PT)
 # ------------------------------------------------------------
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1: st.metric("Projects", df["project_id"].nunique())
 with col2: st.metric("Contract Value Σ (EUR)", f"{total_contract:,.0f}")
 with col3: st.metric("Cash Received Σ (EUR)", f"{total_cash:,.0f}")
-with col4: st.metric("Avg PT (days)", f"{avg_pt:.1f}")
-with col5: st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%", delta=f"{total_fore_eur:,.0f} €")
-with col6: st.metric("Real Compounded CM2% (Actual)", f"{weighted_real_pct:,.1f}%", delta=f"{total_real_eur:,.0f} €")
+with col4: st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%", delta=f"{total_fore_eur:,.0f} €")
+with col5: st.metric("Real Compounded CM2% (Actual)", f"{weighted_real_pct:,.1f}%", delta=f"{total_real_eur:,.0f} €")
 
 # ------------------------------------------------------------
-# Build service table
+# Build service data
 # ------------------------------------------------------------
 service_blocks = ["tpm","cpm","eng","qa_qc_exp","hse","constr","com"]
 svc_rows = []
 for s in service_blocks:
     for field in ["budget","forecast","actual","h_o","b_o","delay"]:
-        colname = f"{s}_{field}"
-        if colname not in df.columns:
-            df[colname] = np.nan
+        if f"{s}_{field}" not in df.columns:
+            df[f"{s}_{field}"] = np.nan
     for _, r in df.iterrows():
         svc_rows.append({
             "project_id": r.get("project_id"),
@@ -132,30 +121,33 @@ svc = svc[~svc["service"].isin(["PROC","MAN"])]
 # ------------------------------------------------------------
 # Tabs
 # ------------------------------------------------------------
-tabs = st.tabs([
-    "Overview", "Internal Services Metrics", "Margin Bridge", 
-    "Forecast Accuracy", "Overrun Heatmap", "Drivers"
-])
+tabs = st.tabs(["Overview", "Internal Services Metrics", "Margin Bridge", "Forecast Accuracy", "Overrun Heatmap", "Drivers"])
 
 # ------------------------------------------------------------
 # 1️⃣ Overview
 # ------------------------------------------------------------
 with tabs[0]:
-    st.subheader("Portfolio overview")
+    st.subheader("Portfolio Overview")
 
-    base_cols = ["contract_value","cash_received","total_o","total_delays","total_penalties","check_v"]
-    df_num = df[[c for c in base_cols if c in df.columns]].apply(pd.to_numeric, errors="coerce")
-    if not df_num.empty:
-        corr = df_num.corr("spearman")
-        fig = px.imshow(corr, color_continuous_scale="tealrose", aspect="auto", title="Correlation heatmap")
-        st.plotly_chart(fig, use_container_width=True)
+    view_mode = st.radio("Y-axis:", ["CM2% Actual", "Margin Δ (EUR)"], horizontal=True)
+    if view_mode == "CM2% Actual":
+        yaxis = "cm2pct_actual"
+        title = "Contract Value vs CM2% Actual (bubble = penalties)"
+    else:
+        df["margin_delta"] = df["cm2_actual"] - df["cm2_forecast"]
+        yaxis = "margin_delta"
+        title = "Contract Value vs Margin Δ (bubble = penalties)"
 
-    st.subheader("Margin distribution")
-    fig = px.scatter(df, x="contract_value", y="cm2pct_actual",
-                     size="total_penalties" if "total_penalties" in df.columns else None,
-                     color="country" if "country" in df.columns else None,
-                     color_discrete_sequence=px.colors.sequential.Teal,
-                     title="Contract Value vs CM2% Actual (bubble = penalties)")
+    fig = px.scatter(
+        df,
+        x="contract_value",
+        y=yaxis,
+        size="total_penalties" if "total_penalties" in df.columns else None,
+        color="country" if "country" in df.columns else None,
+        hover_data=["project_id","customer"] if "customer" in df.columns else ["project_id"],
+        color_discrete_sequence=px.colors.sequential.Teal,
+        title=title
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------
@@ -164,7 +156,6 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Internal Services Metrics")
 
-    # No penalties/delays for HSE, TPM, CPM
     mask_delay = ~svc["service"].isin(["HSE","TPM","CPM"])
     svc.loc[~mask_delay, "delay"] = np.nan
 
@@ -186,18 +177,25 @@ with tabs[1]:
         "HSE":"HSE","CONSTR":"Construction","COM":"Commissioning"
     }
     svc_agg["Service"] = svc_agg["service"].map(pretty)
-    st.dataframe(svc_agg[["Service","projects","budget","actual","forecast",
-                          "h_overruns","b_overruns","delays","median_inflation","inflation_factor"]],
-                 use_container_width=True)
+
+    st.dataframe(
+        svc_agg[["Service","projects","budget","actual","forecast",
+                 "h_overruns","b_overruns","delays","median_inflation","inflation_factor"]],
+        use_container_width=True
+    )
 
     color_seq = px.colors.sequential.Tealgrn
-    fig = px.bar(svc_agg, x="Service", y=["budget","actual","forecast"], barmode="group",
-                 title="Budget vs Actual vs Forecast (hours)", color_discrete_sequence=color_seq)
+    fig = px.bar(
+        svc_agg, x="Service", y=["budget","actual","forecast"], barmode="group",
+        title="Budget vs Actual vs Forecast (hours)", color_discrete_sequence=color_seq
+    )
     st.plotly_chart(fig, use_container_width=True)
 
-    fig2 = px.bar(svc_agg, x="Service", y="inflation_factor",
-                  color="Service", color_discrete_sequence=color_seq,
-                  title="Inflation factor (Actual/Budget)")
+    fig2 = px.bar(
+        svc_agg, x="Service", y="inflation_factor",
+        color="Service", color_discrete_sequence=color_seq,
+        title="Inflation factor (Actual/Budget)"
+    )
     st.plotly_chart(fig2, use_container_width=True)
 
 # ------------------------------------------------------------
@@ -206,11 +204,12 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Margin Δ (Forecast → Actual)")
     df["margin_delta"] = df["cm2_actual"] - df["cm2_forecast"]
-    bridge = df[["project_id","contract_value","cm2_forecast","cm2_actual","margin_delta"]].copy()
-    fig = px.bar(bridge, x="project_id", y="margin_delta",
-                 color=np.where(bridge["margin_delta"]>0,"Gain","Loss"),
-                 color_discrete_sequence=["#66b3a6","#e07a5f"],
-                 title="Margin difference per project (EUR)")
+    bridge = df[["project_id","customer","contract_value","cm2_forecast","cm2_actual","margin_delta"]].copy()
+    fig = px.bar(
+        bridge, x="project_id", y="margin_delta", color=np.where(bridge["margin_delta"]>0,"Gain","Loss"),
+        color_discrete_sequence=["#66b3a6","#e07a5f"], hover_data=["customer"],
+        title="Margin difference per project (EUR)"
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------
@@ -221,9 +220,11 @@ with tabs[3]:
     svc["forecast_accuracy"] = 1 - abs((svc["forecast"] - svc["actual"]) / svc["budget"].replace(0,np.nan))
     acc = svc.groupby("service")["forecast_accuracy"].mean().reset_index()
     acc["Service"] = acc["service"].map(pretty)
-    fig = px.bar(acc, x="Service", y="forecast_accuracy",
-                 color="Service", color_discrete_sequence=px.colors.sequential.Tealgrn,
-                 title="Average forecast accuracy (1 - |Δ|/Budget)")
+    fig = px.bar(
+        acc, x="Service", y="forecast_accuracy",
+        color="Service", color_discrete_sequence=px.colors.sequential.Tealgrn,
+        title="Average forecast accuracy (1 - |Δ|/Budget)"
+    )
     fig.update_yaxes(range=[0,1])
     st.plotly_chart(fig, use_container_width=True)
 
@@ -254,9 +255,11 @@ with tabs[5]:
         coef = pipe.named_steps["clf"].coef_[0]
         ors = np.exp(coef)
         coef_df = pd.DataFrame({"Feature":X.columns,"Odds_Ratio":ors}).sort_values("Odds_Ratio",ascending=False)
-        fig = px.bar(coef_df, x="Feature", y="Odds_Ratio",
-                     color="Feature", color_discrete_sequence=px.colors.sequential.Tealgrn,
-                     title="Odds ratios for CM2% drop (↑ = higher risk)")
+        fig = px.bar(
+            coef_df, x="Feature", y="Odds_Ratio",
+            color="Feature", color_discrete_sequence=px.colors.sequential.Tealgrn,
+            title="Odds ratios for CM2% drop (↑ = higher risk)"
+        )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Not enough variance to fit the logistic model.")
