@@ -1,252 +1,221 @@
-# app.py
-import numpy as np
-import pandas as pd
+# deep_margins/app.py
 import streamlit as st
+import pandas as pd
+import numpy as np
 import plotly.express as px
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
+import plotly.graph_objects as go
 
-# ------------------------------------------------------------
-# Streamlit setup
-# ------------------------------------------------------------
-st.set_page_config(page_title="PSS Analytics Dashboard", layout="wide")
-st.title("📊 PSS Project Analytics")
+st.set_page_config("PSS Project Analytics", layout="wide")
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
-def normalize(c: str) -> str:
-    c = str(c).strip().replace(" ", "_").replace("/", "_").replace("-", "_").replace("%", "pct")
-    while "__" in c:
-        c = c.replace("__", "_")
-    return c.lower()
+# ============================ HELPERS ============================
+def safe_col(df, name_like):
+    for c in df.columns:
+        if name_like.lower() in c.lower():
+            return c
+    return None
 
-def safe_num(x):
+def load_excel(uploaded_file):
     try:
-        return float(x)
-    except Exception:
-        return np.nan
+        df = pd.read_excel(uploaded_file)
+        return df
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        return pd.DataFrame()
 
-def safe_int(v):
+def format_eur(x):
     try:
-        return int(float(v))
-    except Exception:
-        return 0
+        return f"{x:,.0f}".replace(",", " ")
+    except:
+        return "-"
 
-def plotly_config(name: str):
-    return {
-        "displaylogo": False,
-        "toImageButtonOptions": {
-            "format": "png",
-            "filename": f"{name}",
-            "height": 1350,
-            "width": 2400,
-            "scale": 2,
-        },
-    }
-
-# ------------------------------------------------------------
-# Load + Filters
-# ------------------------------------------------------------
-uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
-if not uploaded:
-    st.info("Upload your 'Project List Main.xlsx' file.")
+# ============================ SIDEBAR ============================
+st.sidebar.header("Upload Excel (.xlsx)")
+uploaded_file = st.sidebar.file_uploader(" ", type=["xlsx"])
+if uploaded_file is None:
     st.stop()
 
-df = pd.read_excel(uploaded)
-df.columns = [normalize(c) for c in df.columns]
+df = load_excel(uploaded_file)
+if df.empty:
+    st.stop()
 
-if "country" in df.columns:
-    countries = sorted(df["country"].dropna().unique())
-    selected_countries = st.sidebar.multiselect("Countries", countries, default=countries)
-    df = df[df["country"].isin(selected_countries)]
+# ============================ COLUMN DETECTION ============================
+col_country = safe_col(df, "country")
+col_customer = safe_col(df, "customer")
+col_cv = safe_col(df, "contract")
+col_cash = safe_col(df, "cash")
+col_cm2_bud_pct = safe_col(df, "cm2pct_budget")
+col_cm2_fore_pct = safe_col(df, "cm2pct_forecast")
+col_cm2_bud_eur = safe_col(df, "cm2_budget")
+col_cm2_fore_eur = safe_col(df, "cm2_forecast")
+col_penalties = safe_col(df, "penalt")
+col_service = safe_col(df, "service")
+col_h_overrun = safe_col(df, "hours_over")
+col_b_overrun = safe_col(df, "budget_over")
+col_delay = safe_col(df, "delay")
 
-if "customer" in df.columns:
-    customers = sorted(df["customer"].dropna().unique())
-    selected_customers = st.sidebar.multiselect("Customers", customers, default=customers)
-    df = df[df["customer"].isin(selected_customers)]
+# ============================ FILTERS ============================
+countries = sorted(df[col_country].dropna().unique())
+customers = sorted(df[col_customer].dropna().unique())
 
-st.sidebar.success(f"✅ {len(df)} projects loaded after filters")
+sel_countries = st.sidebar.multiselect("Countries", countries, default=countries)
+sel_customers = st.sidebar.multiselect("Customers", customers, default=customers)
 
-# ------------------------------------------------------------
-# Derived fields
-# ------------------------------------------------------------
-for col in [
-    "contract_value", "cash_received", "cm2_forecast", "cm2_actual",
-    "cm2pct_forecast", "cm2pct_actual", "total_penalties", "total_o",
-    "total_delays", "check_v"
-]:
-    if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+df = df[df[col_country].isin(sel_countries)]
+df = df[df[col_customer].isin(sel_customers)]
 
-total_contract = df["contract_value"].sum()
-total_cash = df["cash_received"].sum()
-weighted_fore_pct = (df["cm2_forecast"].sum() / total_contract * 100) if total_contract else 0
-weighted_real_pct = (df["cm2_actual"].sum() / total_contract * 100) if total_contract else 0
+st.sidebar.success(f"{len(df)} projects loaded after filters")
 
-# ------------------------------------------------------------
-# KPIs
-# ------------------------------------------------------------
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1:
-    st.metric("Projects", len(df))
-with col2:
-    st.metric("Contract Value Σ (EUR)", f"{total_contract:,.0f}")
-with col3:
-    st.metric("Cash Received Σ (EUR)", f"{total_cash:,.0f}")
-with col4:
-    st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%")
-with col5:
-    st.metric("Real Compounded CM2% (Actual)", f"{weighted_real_pct:,.1f}%")
+# ============================ METRICS ============================
+n_projects = df.shape[0]
+sum_contract = df[col_cv].sum()
+sum_cash = df[col_cash].sum()
+cm2_forecast_eur = df[col_cm2_fore_eur].sum()
+cm2_budget_eur = df[col_cm2_bud_eur].sum()
 
-# ------------------------------------------------------------
-# Service data setup
-# ------------------------------------------------------------
-service_blocks = ["tpm", "cpm", "eng", "qa_qc_exp", "hse", "constr", "com", "man", "proc"]
-svc_rows = []
-for s in service_blocks:
-    for field in ["budget", "forecast", "actual", "h_o", "b_o", "delay"]:
-        col = f"{s}_{field}"
-        if col not in df.columns:
-            df[col] = np.nan
-    for _, r in df.iterrows():
-        svc_rows.append({
-            "project_id": r.get("project_id"),
-            "service": s.upper(),
-            "budget": safe_num(r[f"{s}_budget"]),
-            "forecast": safe_num(r[f"{s}_forecast"]),
-            "actual": safe_num(r[f"{s}_actual"]),
-            "h_o": safe_int(r.get(f"{s}_h_o")),
-            "b_o": safe_int(r.get(f"{s}_b_o")),
-            "delay": safe_int(r.get(f"{s}_delay"))
-        })
-svc = pd.DataFrame(svc_rows)
-svc["inflation"] = np.where(svc["budget"] > 0, svc["actual"] / svc["budget"], np.nan)
+cm2_dev_eur = cm2_forecast_eur - cm2_budget_eur
+cm2_dev_pct = (cm2_forecast_eur / cm2_budget_eur - 1) * 100 if cm2_budget_eur else 0
 
-pretty = {
-    "TPM": "TPM",
-    "CPM": "CPM",
-    "ENG": "Engineering",
-    "QA_QC_EXP": "QA/QC/Exp",
-    "HSE": "HSE",
-    "CONSTR": "Construction",
-    "COM": "Commissioning",
-    "MAN": "Manufacturing",
-    "PROC": "Procurement",
-}
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Projects", n_projects)
+col2.metric("Σ Contract Value (EUR)", format_eur(sum_contract))
+col3.metric("Σ Cash Received (EUR)", format_eur(sum_cash))
+col4.metric("Forecast vs Budget CM2%", f"{cm2_dev_pct:.1f}%", format_eur(cm2_dev_eur))
 
-# ------------------------------------------------------------
-# Tabs
-# ------------------------------------------------------------
-tabs = st.tabs([
-    "Overview", "Internal Services Metrics",
-    "Margin Bridge", "Forecast Accuracy", "Overrun Heatmap", "Drivers"
-])
+st.markdown("---")
 
-# ------------------------------------------------------------
-# 1️⃣ Overview
-# ------------------------------------------------------------
-with tabs[0]:
-    st.subheader("Portfolio Overview")
+# ============================ OVERVIEW SCATTER ============================
+st.header("Margin Scatter")
 
-    heat_cols = ["contract_value", "cash_received", "cm2_forecast", "cm2_actual", "total_penalties", "total_o", "total_delays"]
-    df_num = df[heat_cols].apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
-    if not df_num.empty and df_num.shape[1] > 1:
-        corr = df_num.corr("spearman")
-        fig = px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="tealrose", title="Correlation heatmap")
-        st.plotly_chart(fig, use_container_width=True, config=plotly_config("correlation_heatmap"))
+y_choice = st.radio("Y-axis:", ["CM2% Forecast", "CM2 Δ (EUR)"], horizontal=True)
 
-    # Margin Bridge (now real CM2% Δ vs EUR hover)
-    st.subheader("CM2% Real Deviation vs EUR Delta")
-    df["real_cm2_dev"] = df["cm2pct_actual"] - df["cm2pct_forecast"]
-    df["cm2_delta_eur"] = df["cm2_actual"] - df["cm2_forecast"]
-    bridge = df[["project_id", "customer", "real_cm2_dev", "cm2_delta_eur"]].dropna(subset=["real_cm2_dev"])
-    if not bridge.empty:
-        fig = px.bar(
-            bridge, x="project_id", y="real_cm2_dev",
-            color=np.where(bridge["real_cm2_dev"] > 0, "Positive", "Negative"),
-            hover_data=["customer", "cm2_delta_eur"],
-            color_discrete_sequence=["#7fc8a9", "#e07a5f"],
-            title="CM2% Actual vs Forecast (hover for € delta)"
-        )
-        fig.update_layout(xaxis_title="Project", yaxis_title="CM2% Δ (Actual - Forecast)")
-        st.plotly_chart(fig, use_container_width=True, config=plotly_config("margin_bridge"))
+y_col = col_cm2_fore_pct if y_choice == "CM2% Forecast" else col_cm2_fore_eur
+fig_scatter = px.scatter(
+    df,
+    x=col_cv,
+    y=y_col,
+    color=col_country,
+    hover_data=[col_customer, col_country, col_cm2_bud_pct, col_cm2_fore_pct],
+    title=f"Contract Value vs {y_choice}",
+)
+fig_scatter.update_traces(marker=dict(size=10, opacity=0.8))
+st.plotly_chart(fig_scatter, use_container_width=True)
 
-# ------------------------------------------------------------
-# 2️⃣ Internal Services Metrics
-# ------------------------------------------------------------
-with tabs[1]:
-    st.subheader("Internal Services Metrics")
+# ============================ BUBBLE CHART ============================
+st.header("Penalty Distribution Bubble Chart")
 
-    # Full table (includes Man & Proc)
-    svc_agg = svc.groupby("service").agg(
-        projects=("project_id", "nunique"),
-        budget=("budget", "sum"),
-        actual=("actual", "sum"),
-        forecast=("forecast", "sum"),
-        h_overruns=("h_o", "sum"),
-        b_overruns=("b_o", "sum"),
-        delays=("delay", "sum"),
-        median_inflation=("inflation", "median")
-    ).reset_index()
-    svc_agg["Service"] = svc_agg["service"].map(pretty)
-    svc_agg["inflation_factor"] = svc_agg["actual"] / svc_agg["budget"]
-    st.dataframe(svc_agg, use_container_width=True)
+# size = number of penalties (nonzero)
+df["bubble_size"] = df[col_penalties].fillna(0).astype(float)
+df["bubble_shape"] = np.where(df["bubble_size"] == 0, "square", "circle")
 
-    # Chart (exclude Man & Proc)
-    svc_chart = svc_agg[~svc_agg["service"].isin(["MAN", "PROC"])]
-    fig3 = px.bar(
-        svc_chart, x="Service", y=["budget", "actual", "forecast"],
-        barmode="group", color_discrete_sequence=px.colors.sequential.Tealgrn,
-        title="Budget vs Actual vs Forecast (hours)"
+fig_bubble = px.scatter(
+    df,
+    x=col_cv,
+    y=col_cm2_fore_pct,
+    color=col_country,
+    size="bubble_size",
+    hover_data=[col_customer, col_country, col_penalties],
+    title="Contract Value vs CM2% Forecast (bubble = penalties)",
+)
+fig_bubble.update_traces(
+    marker=dict(opacity=0.75, sizemode="area"),
+)
+st.plotly_chart(fig_bubble, use_container_width=True)
+
+# ============================ INTERNAL SERVICE METRICS ============================
+st.header("Internal Services Metrics")
+
+svc_df = df.groupby(col_service, dropna=False).agg({
+    "contract_value": "count",
+    "budget": "sum" if "budget" in df.columns else "sum",
+}).reset_index()
+
+table_cols = [
+    col_service,
+    "projects",
+    "budget",
+    "forecast",
+    "hours_overruns",
+    "budget_overruns",
+    "delays",
+    "median_inflation",
+    "inflation_factor"
+]
+if all(c in df.columns for c in table_cols):
+    st.dataframe(df[table_cols])
+
+# Exclude man & proc for plots
+excluded = ["Manufacturing", "Procurement"]
+df_plot = df[~df[col_service].isin(excluded)]
+
+fig_bar = px.bar(
+    df_plot,
+    x=col_service,
+    y=[col_cm2_bud_eur, col_cm2_fore_eur],
+    barmode="group",
+    title="Budget vs Forecast CM2 by Service",
+)
+st.plotly_chart(fig_bar, use_container_width=True)
+
+# ============================ FORECAST ACCURACY ============================
+st.header("Forecast Accuracy by Service")
+
+if all(c in df.columns for c in [col_service, col_cm2_bud_eur, col_cm2_fore_eur]):
+    acc_df = (
+        df[~df[col_service].isin(excluded)]
+        .groupby(col_service)
+        .apply(lambda x: 1 - abs(x[col_cm2_fore_eur] - x[col_cm2_bud_eur]).sum() / x[col_cm2_bud_eur].sum())
+        .reset_index(name="forecast_accuracy")
     )
-    st.plotly_chart(fig3, use_container_width=True, config=plotly_config("services_baf"))
+    fig_acc = px.bar(
+        acc_df,
+        x=col_service,
+        y="forecast_accuracy",
+        color=col_service,
+        title="Average Forecast Accuracy (1 - |Δ| / Budget)",
+    )
+    fig_acc.update_layout(showlegend=False)
+    st.plotly_chart(fig_acc, use_container_width=True)
 
-# ------------------------------------------------------------
-# 3️⃣ Forecast Accuracy
-# ------------------------------------------------------------
-with tabs[2]:
-    st.subheader("Forecast Accuracy by Service")
-    svc["forecast_accuracy"] = 1 - abs((svc["forecast"] - svc["actual"]) / svc["budget"].replace(0, np.nan))
-    acc = svc.groupby("service")["forecast_accuracy"].mean().reset_index()
-    acc["Service"] = acc["service"].map(pretty)
-    acc_chart = acc[~acc["service"].isin(["MAN", "PROC"])]
-    fig5 = px.bar(acc_chart, x="Service", y="forecast_accuracy", color_discrete_sequence=px.colors.sequential.Tealgrn)
-    fig5.update_yaxes(range=[0, 1])
-    st.plotly_chart(fig5, use_container_width=True, config=plotly_config("forecast_accuracy"))
+# ============================ MARGIN BRIDGE ============================
+st.header("CM2% Real Deviation vs EUR Delta")
 
-# ------------------------------------------------------------
-# 4️⃣ Overrun Heatmap
-# ------------------------------------------------------------
-with tabs[3]:
-    st.subheader("Overrun & Delay density heatmap")
-    svc_filtered = svc[~svc["service"].isin(["MAN", "PROC"])]
-    heat = svc_filtered.groupby("service")[["h_o", "b_o", "delay"]].mean().reset_index()
-    heat["Service"] = heat["service"].map(pretty)
-    melt = heat.melt(id_vars="Service", var_name="Type", value_name="Rate")
-    fig6 = px.density_heatmap(melt, x="Type", y="Service", z="Rate", color_continuous_scale="tealrose")
-    st.plotly_chart(fig6, use_container_width=True, config=plotly_config("overrun_heatmap"))
+if all(c in df.columns for c in [col_cm2_bud_pct, col_cm2_fore_pct, col_cm2_bud_eur, col_cm2_fore_eur]):
+    df["real_cm2_dev"] = df[col_cm2_fore_pct] - df[col_cm2_bud_pct]
+    df["cm2_delta_eur"] = df[col_cm2_fore_eur] - df[col_cm2_bud_eur]
 
-# ------------------------------------------------------------
-# 5️⃣ Drivers (Fixed)
-# ------------------------------------------------------------
-with tabs[4]:
-    st.subheader("Drivers of CM2% Drop (logistic model)")
+    fig_bridge = px.bar(
+        df,
+        x=col_customer,
+        y="real_cm2_dev",
+        color=col_country,
+        hover_data=["cm2_delta_eur"],
+        title="Budget vs Forecast CM2% Deviation (hover for EUR)",
+    )
+    st.plotly_chart(fig_bridge, use_container_width=True)
+else:
+    st.warning("Missing columns for CM2 bridge.")
 
-    df["cm2_drop"] = (df["cm2pct_actual"] < df["cm2pct_forecast"]).astype(int)
-    predictors = [c for c in ["total_o", "total_delays", "check_v"] if c in df.columns]
-    if not predictors:
-        st.info("No numeric predictors available.")
-    else:
-        X = df[predictors].apply(pd.to_numeric, errors="coerce").fillna(0)
-        y = df["cm2_drop"]
-        if y.nunique() < 2:
-            st.warning("Insufficient variation in target variable (all projects up or down).")
-        else:
-            model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(max_iter=300))])
-            model.fit(X, y)
-            odds = np.exp(model.named_steps["clf"].coef_[0])
-            coef_df = pd.DataFrame({"Feature": X.columns, "Odds_Ratio": odds}).sort_values("Odds_Ratio", ascending=False)
-            fig7 = px.bar(coef_df, x="Feature", y="Odds_Ratio", color_discrete_sequence=px.colors.qualitative.Set2)
-            st.plotly_chart(fig7, use_container_width=True, config=plotly_config("drivers_logit"))
+# ============================ HEATMAP ============================
+st.header("Overrun & Delay density heatmap")
+
+heat_vars = [v for v in [col_h_overrun, col_b_overrun, col_delay] if v in df.columns]
+if col_service and heat_vars:
+    melt_df = df.melt(
+        id_vars=[col_service],
+        value_vars=heat_vars,
+        var_name="metric",
+        value_name="value"
+    ).dropna()
+    melt_df["rate"] = (melt_df["value"] > 0).astype(int)
+    heat_data = melt_df.groupby([col_service, "metric"])["rate"].mean().reset_index()
+    fig_heat = px.density_heatmap(
+        heat_data,
+        x="metric",
+        y=col_service,
+        z="rate",
+        color_continuous_scale="RdYlGn_r",
+        title="Average Overrun Rate by Service",
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+else:
+    st.info("No overrun/delay data available.")
