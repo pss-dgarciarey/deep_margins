@@ -4,3 +4,4 @@ streamlit
 plotly
 scikit-learn
 openpyxl
+statsmodels
