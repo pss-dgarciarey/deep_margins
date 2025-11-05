@@ -111,6 +111,17 @@ SERVICE_PRETTY = {
 }
 SERVICE_BLOCKS = ["tpm", "cpm", "eng", "qa_qc_exp", "hse", "constr", "com", "man", "proc"]
 
+# Flags to exclude from Drivers model (they show spurious 1s)
+EXCLUDED_DRIVER_FLAGS = {
+    # budget_overrun
+    "qa_qc_exp_b_o_flag", "cpm_b_o_flag", "tpm_b_o_flag", "hse_b_o_flag",
+    # hours_overrun
+    "proc_h_o_flag", "hse_h_o_flag", "man_h_o_flag",
+    # delay
+    "qa_qc_exp_delay_flag", "cpm_delay_flag", "tpm_delay_flag",
+    "hse_delay_flag", "constr_delay_flag",
+}
+
 def normalize(c: str) -> str:
     c = str(c).strip().replace(" ", "_").replace("/", "_").replace("-", "_").replace("%", "pct")
     while "__" in c:
@@ -212,20 +223,41 @@ for col in num_candidates:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
+# Identify Real CM2% Deviation column once and reuse everywhere
+REAL_DEV_COL = (
+    find_col(df, ["real","cm2","pct","dev"]) or
+    find_col(df, ["cm2pct","real","dev"]) or
+    find_col(df, ["cm2pct","dev"])
+)
+
 # ------------------------------------------------------------
-# KPIs
+# KPIs (use Real CM2% Deviation where "real" is referenced)
 # ------------------------------------------------------------
 total_contract = df.get("contract_value", pd.Series(dtype=float)).sum()
 total_cash = df.get("cash_received", pd.Series(dtype=float)).sum()
 weighted_fore_pct = (df.get("cm2_forecast", 0).sum() / total_contract * 100) if total_contract else 0
-weighted_real_pct = (df.get("cm2_actual", 0).sum() / total_contract * 100) if total_contract else 0
+
+# Weighted Real CM2% Deviation (by contract value) — fallback to simple mean if no weights
+if REAL_DEV_COL is not None:
+    dev_series = pd.to_numeric(df[REAL_DEV_COL], errors="coerce")
+    weights = pd.to_numeric(df.get("contract_value", pd.Series(index=df.index)), errors="coerce").fillna(0)
+    if (weights > 0).sum() > 0:
+        weighted_real_dev = (dev_series.fillna(0) * weights).sum() / (weights[weights > 0].sum())
+    else:
+        weighted_real_dev = dev_series.mean()
+else:
+    weighted_real_dev = np.nan
 
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1: st.metric("Projects", len(df))
 with c2: st.metric("Contract Value Σ (EUR)", f"{total_contract:,.0f}")
 with c3: st.metric("Cash Received Σ (EUR)", f"{total_cash:,.0f}")
 with c4: st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%")
-with c5: st.metric("Real Compounded CM2% (Actual)", f"{weighted_real_pct:,.1f}%")
+with c5:
+    if REAL_DEV_COL is not None and pd.notna(weighted_real_dev):
+        st.metric("Weighted Real CM2% Deviation", f"{weighted_real_dev:,.1f}%")
+    else:
+        st.metric("Weighted Real CM2% Deviation", "—")
 
 # ------------------------------------------------------------
 # Build service-level long table
@@ -363,18 +395,17 @@ with tabs[1]:
     st.plotly_chart(fig3, use_container_width=True, config=plotly_config("services_baf"))
 
 # ------------------------------------------------------------
-# 3) Margin Bridge (Real CM2% deviation from file)
+# 3) Margin Bridge (Real CM2% Deviation from file)
 # ------------------------------------------------------------
 with tabs[2]:
     st.subheader("Real CM2% Deviation")
 
-    # Try to find a precomputed column for real deviation (do NOT recompute)
-    real_dev_col = (find_col(df, ["real","cm2","pct","dev"]) or
-                    find_col(df, ["cm2pct","real","dev"]) or
-                    find_col(df, ["cm2pct","dev"]))
-    eur_delta_col = (find_col(df, ["cm2","eur","dev"]) or
-                     find_col(df, ["delta","cm2"]) or
-                     find_col(df, ["cm2","eur","delta"]))
+    real_dev_col = REAL_DEV_COL
+    eur_delta_col = (
+        find_col(df, ["cm2","eur","dev"]) or
+        find_col(df, ["delta","cm2"]) or
+        find_col(df, ["cm2","eur","delta"])
+    )
 
     if real_dev_col is None:
         st.warning("Could not find a precomputed 'Real CM2% Deviation' column in the Excel.")
@@ -405,7 +436,7 @@ with tabs[3]:
     def ensure_defaults():
         ss = st.session_state
         ss.setdefault("p_target_col",
-            find_col(df, ["real","cm2","pct","dev"]) or
+            REAL_DEV_COL or
             find_col(df, ["cm2pct","forecast"]) or
             (df.columns[0] if len(df.columns) else "x")
         )
@@ -466,9 +497,9 @@ with tabs[3]:
 
     # ---- target metric (negative margin flag) ----
     target_choices = [c for c in df.columns if "cm2" in c and "pct" in c] or list(df.columns)
-    target_idx = target_choices.index(st.session_state["p_target_col"]) if st.session_state["p_target_col"] in target_choices else 0
+    default_target = REAL_DEV_COL if REAL_DEV_COL in target_choices else target_choices[0]
     p_target_col = st.selectbox("Outcome metric that defines 'negative margin' (< 0):",
-                                target_choices, index=target_idx, key="p_target_sel")
+                                target_choices, index=target_choices.index(default_target), key="p_target_sel")
     target_flag = (pd.to_numeric(df[p_target_col], errors="coerce") < 0).astype(int)
 
     st.markdown("### A) Probability of **negative margin** given conditions")
@@ -476,7 +507,7 @@ with tabs[3]:
 
     # ----- Condition 1
     with colA:
-        c1_idx = list(df.columns).index(st.session_state["p_c1_col"]) if st.session_state["p_c1_col"] in df.columns else 0
+        c1_idx = list(df.columns).index(st.session_state.get("p_c1_col", df.columns[0]))
         c1_col = st.selectbox("Condition 1", df.columns, index=c1_idx, format_func=humanize_col, key="p_c1_col_sel")
         if is_binary_series(df[c1_col]):
             c1_val = st.selectbox("is", ["Yes (1)", "No (0)"], key="p_c1_flag_sel")
@@ -492,10 +523,10 @@ with tabs[3]:
 
     # ----- Condition 2
     with colB:
-        use_c2 = st.checkbox("Add Condition 2", value=st.session_state["p_use_c2"], key="p_use_c2_chk")
-        logic = st.radio("Logic", ["AND", "OR"], horizontal=True, index=(0 if st.session_state["p_logic"]=="AND" else 1), key="p_logic_radio")
+        use_c2 = st.checkbox("Add Condition 2", value=st.session_state.get("p_use_c2", False), key="p_use_c2_chk")
+        logic = st.radio("Logic", ["AND", "OR"], horizontal=True, index=(0 if st.session_state.get("p_logic","AND")=="AND" else 1), key="p_logic_radio")
         if use_c2:
-            c2_idx = list(df.columns).index(st.session_state["p_c2_col"]) if st.session_state["p_c2_col"] in df.columns else 0
+            c2_idx = list(df.columns).index(st.session_state.get("p_c2_col", df.columns[0]))
             c2_col = st.selectbox("Condition 2", df.columns, index=c2_idx, format_func=humanize_col, key="p_c2_col_sel")
             if is_binary_series(df[c2_col]):
                 c2_val = st.selectbox("is", ["Yes (1)", "No (0)"], key="p_c2_flag_sel")
@@ -544,14 +575,14 @@ with tabs[3]:
     st.markdown("### B) Numeric ↔ Flag (and reverse)")
     numeric_candidates = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     flag_candidates = [c for c in df.columns if is_binary_series(df[c])]
-    bn_idx = numeric_candidates.index(st.session_state["b_num"]) if numeric_candidates and st.session_state["b_num"] in numeric_candidates else 0
-    bf_idx = flag_candidates.index(st.session_state["b_flag"]) if flag_candidates and st.session_state["b_flag"] in flag_candidates else 0
+    bn_idx = numeric_candidates.index(st.session_state.get("b_num", numeric_candidates[0])) if numeric_candidates else 0
+    bf_idx = flag_candidates.index(st.session_state.get("b_flag", flag_candidates[0])) if flag_candidates else 0
     colN, colF = st.columns(2)
     with colN:
         b_num = st.selectbox("Numeric variable", numeric_candidates if numeric_candidates else df.columns,
                              index=bn_idx, format_func=humanize_col, key="p_b_num_sel")
-        b_comp = st.selectbox("Compare", ["≥", ">", "≤", "<", "="], index=["≥",">","≤","<","="].index(st.session_state["b_op"]), key="p_b_op_sel")
-        b_thr = st.number_input("Threshold (B)", value=float(st.session_state["b_thr"]), step=1.0, key="p_b_thr_num")
+        b_comp = st.selectbox("Compare", ["≥", ">", "≤", "<", "="], index=["≥",">","≤","<","="].index(st.session_state.get("b_op","≥")), key="p_b_op_sel")
+        b_thr = st.number_input("Threshold (B)", value=float(st.session_state.get("b_thr",0.0)), step=1.0, key="p_b_thr_num")
     with colF:
         b_flag = st.selectbox("Flag variable (0/1)", flag_candidates if flag_candidates else df.columns,
                               index=bf_idx, format_func=humanize_col, key="p_b_flag_sel")
@@ -577,8 +608,8 @@ with tabs[3]:
 
     # C) Flag | Numeric→Flag
     st.markdown("### C) Flag | Numeric→Flag")
-    ct_idx = flag_candidates.index(st.session_state["c_flag"]) if flag_candidates and st.session_state["c_flag"] in flag_candidates else 0
-    cn_idx = numeric_candidates.index(st.session_state["c_num"]) if numeric_candidates and st.session_state["c_num"] in numeric_candidates else 0
+    ct_idx = flag_candidates.index(st.session_state.get("c_flag", flag_candidates[0])) if flag_candidates else 0
+    cn_idx = numeric_candidates.index(st.session_state.get("c_num", numeric_candidates[0])) if numeric_candidates else 0
     colC1, colC2 = st.columns(2)
     with colC1:
         c_tgt = st.selectbox("Target flag", flag_candidates if flag_candidates else df.columns,
@@ -586,8 +617,8 @@ with tabs[3]:
     with colC2:
         c_num = st.selectbox("Numeric to convert → flag", numeric_candidates if numeric_candidates else df.columns,
                              index=cn_idx, format_func=humanize_col, key="p_c_num_sel")
-        c_op = st.selectbox("Operator", ["≥", ">", "≤", "<", "="], index=["≥",">","≤","<","="].index(st.session_state["c_op"]), key="p_c_op_sel")
-        c_thr = st.number_input("Threshold (C)", value=float(st.session_state["c_thr"]), step=1.0, key="p_c_thr_num")
+        c_op = st.selectbox("Operator", ["≥", ">", "≤", "<", "="], index=["≥",">","≤","<","="].index(st.session_state.get("c_op","≥")), key="p_c_op_sel")
+        c_thr = st.number_input("Threshold (C)", value=float(st.session_state.get("c_thr",0.0)), step=1.0, key="p_c_thr_num")
 
     conv_flag = to_flag(df[c_num], c_op, float(c_thr))
     tgt_ser = pd.to_numeric(df[c_tgt], errors="coerce").fillna(0).astype(int)
@@ -632,9 +663,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Drivers of CM2% deviation (service-level)")
 
-    real_dev_col = (find_col(df, ["real","cm2","pct","dev"]) or
-                    find_col(df, ["cm2pct","real","dev"]) or
-                    find_col(df, ["cm2pct","forecast"]))
+    real_dev_col = REAL_DEV_COL or find_col(df, ["cm2pct","forecast"])
     if real_dev_col is None:
         st.warning("No suitable CM2% real/forecast deviation column found.")
     else:
@@ -647,6 +676,9 @@ with tabs[5]:
                 col = f"{s}_{suffix}"
                 if col in df.columns:
                     fcol = f"{s}_{suffix}_flag"
+                    # skip excluded noisy flags
+                    if fcol in EXCLUDED_DRIVER_FLAGS:
+                        continue
                     feat_df[fcol] = (pd.to_numeric(df[col], errors="coerce").fillna(0) > 0).astype(int)
                     feat_cols.append((fcol, s, label))
 
