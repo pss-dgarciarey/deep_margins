@@ -2,7 +2,6 @@
 # app.py — Deep Margins Dashboard (login, themes, NL probabilities)
 # ================================================================
 
-import io
 import re
 import numpy as np
 import pandas as pd
@@ -103,11 +102,6 @@ st.session_state["theme"] = sel_theme
 TEMPLATE = THEMES[sel_theme]["template"]
 
 # ------------------------------------------------------------
-# Page Title
-# ------------------------------------------------------------
-st.title("📊 Deep Margins — PSS Analytics Dashboard")
-
-# ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
 SERVICE_PRETTY = {
@@ -143,10 +137,8 @@ def safe_int(v):
     except Exception: return 0
 
 def plotly_config(name: str):
-    return {
-        "displaylogo": False,
-        "toImageButtonOptions": {"format":"png","filename":f"{name}","height":1350,"width":2400,"scale":2},
-    }
+    return {"displaylogo": False,
+            "toImageButtonOptions": {"format":"png","filename":f"{name}","height":1350,"width":2400,"scale":2}}
 
 def is_binary_series(s: pd.Series) -> bool:
     s = pd.to_numeric(s, errors="coerce").dropna()
@@ -175,41 +167,63 @@ def humanize_col(c: str) -> str:
     s = s.replace("_", " ").strip()
     return s[:1].upper() + s[1:]
 
+# ---------- Smarter column resolver ----------
 def find_col(df: pd.DataFrame, must_contain):
-    tokens = [t.lower() for t in must_contain]
+    """
+    Smarter column resolver:
+    - If tokens include a service + {b_o,h_o,delay}, prefer '<service>_<suffix>'.
+    - Otherwise fall back to 'all tokens present' search, then underscore-joined.
+    """
+    tokens = [t.lower() for t in must_contain if t]
+    svc_tokens = set(["tpm","cpm","eng","qa_qc_exp","hse","constr","com","man","proc"])
+    suffix_tokens = set(["b_o","h_o","delay"])
+
+    services = [t for t in tokens if t in svc_tokens]
+    suffixes = [t for t in tokens if t in suffix_tokens]
+    if services and suffixes:
+        candidate = f"{services[0]}_{suffixes[0]}"
+        if candidate in df.columns:
+            return candidate
+
     for c in df.columns:
         lc = c.lower()
         if all(t in lc for t in tokens):
+            return c
+
+    joined = "_".join(tokens)
+    for c in df.columns:
+        if joined in c.lower():
             return c
     return None
 
 # ---------- Natural-language helpers (Simple mode) ----------
 def _normalize_query_text(q: str) -> str:
-    """Make free text more machine-friendly and inject operators for common phrases."""
+    """
+    Make free text machine-friendly and inject operators.
+    Normalizes service-delayed / service-overrun forms before generic rules.
+    """
     q = q.lower().strip()
 
-    # trailing clause after cue words
+    # capture after cue words
     m = re.search(r"\b(when|if|given|where)\b(.*)$", q)
     if m: q = m.group(2).strip()
 
-    # percent
     q = q.replace("%", "pct")
 
-    # comparators (phrases -> symbols) — word-bounded
-    replacements = [
+    # comparators
+    for pat, rep in [
         (r"\bno more than\b", "<="), (r"\bat most\b", "<="),
         (r"\bnot more than\b", "<="), (r"\bless than or equal to\b", "<="),
         (r"\bat least\b", ">="), (r"\bnot less than\b", ">="),
         (r"\bgreater than or equal to\b", ">="),
         (r"\bmore than\b", ">"), (r"\bgreater than\b", ">"), (r"\bover\b", ">"),
         (r"\bunder\b", "<"), (r"\bbelow\b", "<"), (r"\bless than\b", "<"),
-        (r"\bequals?\b", "="), (r"\bis\b", "is"), (r"\bare\b", "is"),
-    ]
-    for pat, rep in replacements:
+        (r"\bequals?\b", "="), (r"\bis\b", " is "), (r"\bare\b", " is "),
+    ]:
         q = re.sub(pat, f" {rep} ", q)
 
-    # synonyms (map to canonical service tokens)
-    synonyms = {
+    # service synonyms
+    for pat, rep in {
         r"\bconstruction\b": "constr",
         r"\bengineering\b": "eng",
         r"\bcommissioning\b|\bcommisioning\b|\bcommission\b": "com",
@@ -222,107 +236,94 @@ def _normalize_query_text(q: str) -> str:
         r"\btotal\s*delays?\b": "total delays",
         r"\bcm2\s*forecast\b": "cm2 forecast",
         r"\bcm2\s*pct\s*forecast\b|\bcm2pct\s*forecast\b|\bcm2\s*%?\s*forecast\b": "cm2pct forecast",
-    }
-    for pat, rep in synonyms.items():
+    }.items():
         q = re.sub(pat, rep, q)
 
-    # boolean phrasing -> explicit
+    # service-specific delayed
+    q = re.sub(r"\b([a-z_]+)\s+(?:is\s+)?not\s+delayed\b", r"\1 delay = no", q)
+    q = re.sub(r"\b([a-z_]+)\s+(?:is\s+)?delayed\b", r"\1 delay = yes", q)
+
+    # service-specific overruns
+    q = re.sub(r"\b([a-z_]+)\s+(?:is\s+)?budget\s+(?:is\s+)?over[-\s]?run(s)?\b", r"\1 b_o > 0", q)
+    q = re.sub(r"\b([a-z_]+)\s+(?:is\s+)?hours?\s+(?:is\s+)?over[-\s]?run(s)?\b", r"\1 h_o > 0", q)
+    q = re.sub(r"\b([a-z_]+)\s+budget\s+over[-\s]?run(s)?\b", r"\1 b_o > 0", q)
+    q = re.sub(r"\b([a-z_]+)\s+hours?\s+over[-\s]?run(s)?\b", r"\1 h_o > 0", q)
+    q = re.sub(r"\b([a-z_]+)\s+is\s+b_o\s*>\s*0\b", r"\1 b_o > 0", q)
+    q = re.sub(r"\b([a-z_]+)\s+is\s+h_o\s*>\s*0\b", r"\1 h_o > 0", q)
+
+    # generic booleans/overruns
     q = re.sub(r"\bnot\s+delayed\b", "delay = no", q)
     q = re.sub(r"\bno\s+delay\b", "delay = no", q)
     q = re.sub(r"\bdelays?\b", "delay", q)
-    q = re.sub(r"\b(is\s+)?delayed\b", "delay = yes", q)
-
-    # Generic overruns (service-agnostic)
-    q = re.sub(r"\bbudget\s+over[-\s]?run(s)?\b", "b_o > 0", q)
-    q = re.sub(r"\bbudget\s+(?:is|was|are|were)\s+over[-\s]?run(s)?\b", "b_o > 0", q)
+    q = re.sub(r"\bbudget\s+(?:is\s+)?over[-\s]?run(s)?\b", "b_o > 0", q)
+    q = re.sub(r"\bhours?\s+(?:is\s+)?over[-\s]?run(s)?\b", "h_o > 0", q)
     q = re.sub(r"\b(over\s+budget|blew\s+the\s+budget|ran\s+over\s+budget)\b", "b_o > 0", q)
-
-    q = re.sub(r"\bhours?\s+over[-\s]?run(s)?\b", "h_o > 0", q)
-    q = re.sub(r"\bhours?\s+(?:is|was|are|were)\s+over[-\s]?run(s)?\b", "h_o > 0", q)
     q = re.sub(r"\b(over\s+hours|overran\s+hours|blew\s+the\s+hours)\b", "h_o > 0", q)
 
-    # SERVICE + budget/hours forms (with optional 'is' before budget/hours and/or overrun)
-    q = re.sub(r"\b([a-z_]+)\s+(?:is\s+)?budget\s+(?:is\s+)?over[-\s]?run(s)?\b", r"\1 b_o > 0", q)
-    q = re.sub(r"\b([a-z_]+)\s+(?:is\s+)?hours?\s+(?:is\s+)?over[-\s]?run(s)?\b", r"\1 h_o > 0", q)
-
-    # Also accept SERVICE + 'budget overrun' / 'hours overrun' without 'is'
-    q = re.sub(r"\b([a-z_]+)\s+budget\s+over[-\s]?run(s)?\b", r"\1 b_o > 0", q)
-    q = re.sub(r"\b([a-z_]+)\s+hours?\s+over[-\s]?run(s)?\b", r"\1 h_o > 0", q)
-
-    # tidy spaces
     q = re.sub(r"\s+", " ", q).strip()
     return q
 
 def _parse_number(text: str) -> float:
-    s = text.strip().lower()
-    s = s.replace("€","").replace("$","").replace("£","")
+    s = text.strip().lower().replace("€","").replace("$","").replace("£","")
     s = s.replace(" ", "").replace("_","").replace(",", "")
-    if s.count(".") > 1:  # many dots -> thousands separators
-        s = s.replace(".", "")
+    if s.count(".") > 1: s = s.replace(".", "")
     mult = 1.0
-    if s.endswith("bn"):
-        mult, s = 1e9, s[:-2]
-    elif s.endswith("b"):
-        mult, s = 1e9, s[:-1]
-    elif s.endswith("m"):
-        mult, s = 1e6, s[:-1]
-    elif s.endswith("k"):
-        mult, s = 1e3, s[:-1]
+    if s.endswith("bn"): mult, s = 1e9, s[:-2]
+    elif s.endswith("b"): mult, s = 1e9, s[:-1]
+    elif s.endswith("m"): mult, s = 1e6, s[:-1]
+    elif s.endswith("k"): mult, s = 1e3, s[:-1]
     s = s.replace("pct", "")
-    try:
-        return float(s) * mult
-    except Exception:
-        return np.nan
+    try: return float(s) * mult
+    except Exception: return np.nan
 
 def parse_query_to_mask(q: str, df: pd.DataFrame, return_details: bool = False):
     """
-    Parse natural phrases like:
+    Parse phrases like:
       'engineering hours is overrun and commissioning budget is overrun'
-      'eng hours overrun or com budget overrun'
+      'eng is not delayed'
       'contract value > 1.5m or total penalties > 0'
-    Supports AND/OR, (=, is, ==, >=, <=, >, <), yes/no/true/false, and k/m/bn suffixes.
+    Supports AND/OR, (=, is, ==, >=, <=, >, <), yes/no/true/false, and k/m/bn.
+    Pretty-prints overrun flags as '= Yes/No'.
     """
     normalized = _normalize_query_text(q)
-
     parts = re.split(r"\b(and|or)\b", normalized)
+
     clauses, ops, details = [], [], []
     for part in parts:
         part = part.strip()
-        if part in ("and", "or"):
+        if part in ("and","or"):
             ops.append(part.upper()); continue
         if not part: continue
 
-        # Prefer explicit op patterns
         m = re.search(r"(.+?)\s*(=|is|==|>=|<=|>|<)\s*(.+)$", part)
         if m:
             lhs, op, rhs = [x.strip() for x in m.groups()]
 
-            # map tokens to a column
             tokens = [t for t in re.split(r"[^\w]+", lhs) if t]
             if "cm2pct" in tokens and "forecast" in tokens:
                 tokens = [t for t in tokens if t not in ("cm2pct","forecast")] + ["cm2pct","forecast"]
-
             col = find_col(df, tokens) or find_col(df, ["_".join(tokens)])
             if col is None:
                 details.append({"raw": part, "parsed": None, "reason": "no column"}); continue
 
-            # RHS boolean?
             if re.fullmatch(r"(yes|true|1|no|false|0)", rhs):
                 val = 1 if rhs in ("yes","true","1") else 0
                 ser = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
                 mask = (ser == val)
                 desc = f"{humanize_col(col)} = {'Yes' if val==1 else 'No'}"
-
             else:
                 thr = _parse_number(rhs)
                 ser = pd.to_numeric(df[col], errors="coerce")
                 mask = (to_flag(ser, op, float(thr)) == 1)
 
-                # Pretty description; collapse overruns > 0 into "= Yes"
                 pretty = humanize_col(col)
-                if (col.endswith("_h_o") or col.endswith("_b_o")) and op in (">", ">=", "is", "=", "==") and float(thr) <= 0:
-                    desc = f"{pretty} = Yes"
-                else:
+                desc = None
+                if col.endswith("_h_o") or col.endswith("_b_o"):
+                    if (op in {">", ">="} and float(thr) <= 0) or (op in ("is","=","==") and str(rhs) in ("1","yes","true")):
+                        desc = f"{pretty} = Yes"
+                    elif (op in {"<","<=","=","=="} and float(thr) <= 0) or (op in ("is","=","==") and str(rhs) in ("0","no","false")):
+                        desc = f"{pretty} = No"
+                if desc is None:
                     sym = op if op in ("<=",">=","<",">","=","is","==") else op
                     desc = f"{pretty} {sym} {thr:g}"
 
@@ -330,7 +331,6 @@ def parse_query_to_mask(q: str, df: pd.DataFrame, return_details: bool = False):
             details.append({"raw": part, "parsed": {"col": col, "op": op, "rhs": rhs}, "n": int(mask.sum())})
             continue
 
-        # Fallback: boolean intent like 'eng delay'
         tokens = [t for t in re.split(r"[^\w]+", part) if t]
         if tokens:
             col = find_col(df, tokens) or find_col(df, ["_".join(tokens)])
@@ -351,11 +351,9 @@ def parse_query_to_mask(q: str, df: pd.DataFrame, return_details: bool = False):
     desc_text = desc
     for (m, d), op in zip(clauses[1:], ops):
         if op == "AND":
-            mask = mask & m
-            desc_text = f"{desc_text} AND {d}"
+            mask = mask & m; desc_text = f"{desc_text} AND {d}"
         else:
-            mask = mask | m
-            desc_text = f"{desc_text} OR {d}"
+            mask = mask | m; desc_text = f"{desc_text} OR {d}"
 
     return (mask, desc_text, details, normalized) if return_details else (mask, desc_text)
 
@@ -403,6 +401,8 @@ REAL_DEV_COL = (
 # ------------------------------------------------------------
 # KPIs (label only changed; calculations unchanged)
 # ------------------------------------------------------------
+st.title("📊 Deep Margins — PSS Analytics Dashboard")
+
 total_contract = df.get("contract_value", pd.Series(dtype=float)).sum()
 total_cash = df.get("cash_received", pd.Series(dtype=float)).sum()
 weighted_fore_pct = (df.get("cm2_forecast", 0).sum() / total_contract * 100) if total_contract else 0
@@ -591,41 +591,26 @@ Pick the **Outcome metric** below (default tries to use “Real CM2% Deviation�
 ---
 
 ### How to write queries (plain language)
-You can use **AND/OR**, numbers with **k/m/bn**, and phrases like **over/under/at least/no more than**.  
+Use **AND/OR**, numbers with **k/m/bn**, and phrases like **over/under/at least/no more than**.
 Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budget is overrun”*).
 
 **Delays**
-- `engineering is delayed`
-- `eng delay = yes`
-- `no delay in construction`
+- `engineering is delayed` • `eng delay = yes` • `no delay in construction`
 
 **Budget overruns**
-- `commissioning budget is overrun`
-- `construction budget overrun`
-- `constr bo > 0`
-- `qa qc exp budget is over-run`
-- `hse ran over budget`
+- `commissioning budget is overrun` • `construction budget overrun` • `constr bo > 0` • `qa qc exp budget is over-run`
 
 **Hours overruns**
-- `engineering hours is overrun`
-- `cpm hours are overrun`
-- `man blew the hours`
-- `eng ho > 0`
+- `engineering hours is overrun` • `cpm hours are overrun` • `eng ho > 0`
 
-**Penalties / delays totals**
-- `total penalties > 0`
-- `total penalties = 0`
-- `total delays > 3`
+**Penalties / totals**
+- `total penalties > 0` • `total penalties = 0` • `total delays > 3`
 
 **Money with suffixes**
-- `contract value > 1.5m`
-- `contract value no more than 750k`
-- `contract value at least 2m`
+- `contract value > 1.5m` • `contract value no more than 750k` • `contract value at least 2m`
 
 **CM2 metrics**
-- `cm2% forecast under 12`
-- `cm2pct forecast <= 8`
-- `cm2 forecast <= 100000`
+- `cm2% forecast under 12` • `cm2pct forecast <= 8` • `cm2 forecast <= 100000`
 
 **Combine conditions**
 - `engineering hours is overrun and commissioning budget is overrun`
@@ -810,13 +795,13 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
         p1,p2,p3 = st.columns(3)
         with p1:
             st.button("P(neg. margin | ENG delay=Yes)", use_container_width=True,
-                      on_click=apply_preset, args=("eng_delay_yes",))
+                      on_click=lambda: apply_preset("eng_delay_yes"))
         with p2:
             st.button("P(neg. margin | CONSTR b_o>0 AND CPM h_o>0)", use_container_width=True,
-                      on_click=apply_preset, args=("constr_bo_and_cpm_ho",))
+                      on_click=lambda: apply_preset("constr_bo_and_cpm_ho"))
         with p3:
             st.button("P(penalty>0 | PROC delay=Yes)", use_container_width=True,
-                      on_click=apply_preset, args=("penalty_given_proc_delay",))
+                      on_click=lambda: apply_preset("penalty_given_proc_delay"))
 
         st.divider()
 
@@ -830,7 +815,9 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
         with colN:
             b_num = st.selectbox("Numeric variable", numeric_candidates if numeric_candidates else df.columns,
                                  index=bn_idx, format_func=humanize_col, key="p_b_num_sel")
-            b_comp = st.selectbox("Compare", ["≥", ">", "≤", "<", "=", "=="], index=["≥",">","≤","<","=","=="].index(st.session_state.get("b_op","≥")), key="p_b_op_sel")
+            b_comp = st.selectbox("Compare", ["≥", ">", "≤", "<", "=", "=="],
+                                  index=["≥",">","≤","<","=","=="].index(st.session_state.get("b_op","≥")),
+                                  key="p_b_op_sel")
             b_thr = st.number_input("Threshold (B)", value=float(st.session_state.get("b_thr",0.0)), step=1.0, key="p_b_thr_num")
         with colF:
             b_flag = st.selectbox("Flag variable (0/1)", flag_candidates if flag_candidates else df.columns,
@@ -866,7 +853,8 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
         with colC2:
             c_num = st.selectbox("Numeric to convert → flag", numeric_candidates if numeric_candidates else df.columns,
                                  index=cn_idx, format_func=humanize_col, key="p_c_num_sel")
-            c_op = st.selectbox("Operator", ["≥", ">", "≤", "<", "=", "=="], index=["≥",">","≤","<","=","=="].index(st.session_state.get("c_op","≥")), key="p_c_op_sel")
+            c_op = st.selectbox("Operator", ["≥", ">", "≤", "<", "=", "=="],
+                                index=["≥",">","≤","<","=","=="].index(st.session_state.get("c_op","≥")), key="p_c_op_sel")
             c_thr = st.number_input("Threshold (C)", value=float(st.session_state.get("c_thr",0.0)), step=1.0, key="p_c_thr_num")
 
         conv_flag = to_flag(df[c_num], c_op, float(c_thr))
