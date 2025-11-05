@@ -565,13 +565,97 @@ with tabs[3]:
 
     with st.expander("ℹ️ How to use + examples (click)"):
         st.markdown("""
-**What this answers:** Chance a project ends with **negative margin** (Real CM2% Deviation < 0) under your conditions.
+**What this answers**  
+Chance a project ends with **negative margin** (Real CM2% Deviation < 0) under your conditions.  
+Pick the **Outcome metric** below (default tries to use “Real CM2% Deviation” if present).
 
-**Examples (paste as-is):**
+---
+
+### How to write queries (plain language)
+You can use **AND/OR**, numbers with **k/m/bn**, and phrases like **over/under/at least/no more than**.  
+Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budget is overrun”*).
+
+**Delays**
 - `engineering is delayed`
+- `eng delay = yes`
+- `no delay in construction`  *(interpreted as `Construction delay = No`)*
+
+**Budget overruns**
+- `commission budget is overrun`
+- `construction budget overrun`
+- `constr bo > 0`  *(shorthand)*
+- `qa qc exp budget is over-run`
+- `hse budget overruns`
+
+**Hours overruns**
+- `cpm hours are overrun`
+- `man hours overrun`
+- `eng ho > 0`  *(shorthand)*
+
+**Penalties / delays totals**
+- `total penalties > 0`
+- `total penalties = 0`
+- `total delays > 3`
+
+**Contract value / money with suffixes**
+- `contract value > 1.5m`
+- `contract value no more than 750k`
+- `contract value at least 2m`
+
+**CM2% metrics**
+- `cm2% forecast under 12`
+- `cm2pct forecast <= 8`
+- `cm2 forecast <= 100000`
+
+**Combine conditions**
+- `engineering is delayed and commission budget is overrun`
 - `construction budget overrun and cpm hours overrun`
 - `cm2% forecast <= 12 or total penalties > 0`
+- `contract value > 2m and eng delay = yes`
+- `no delay in construction and total penalties = 0`
+- `eng delay = yes or hse budget is overrun`
+
+**Service name synonyms it understands**
+- `commission` → Commissioning (`com`)
+- `engineering` → Engineering (`eng`)
+- `construction` → Construction (`constr`)
+- `quality` / `qa qc exp` → QA/QC/Exp
+- `hse` / `health and safety` → HSE
+- `manufacturing` → Manufacturing (`man`)
+- `procurement` → Procurement (`proc`)
+
+**Comparator phrases it understands**
+- `over`, `greater than`, `more than` → `>`
+- `under`, `below`, `less than` → `<`
+- `at least`, `not less than` → `>=`
+- `no more than`, `at most` → `<=`
+- `equals`, `is` → `=`
+
+---
+
+### Reading the result
+- The green box is **P(negative margin | your conditions)** with **n** = rows matching.  
+- Compare it to the **Base rate** shown below to see lift (risk increase).
+
+**Tip:** If n < ~20, treat as noisy. Tighten/loosen your conditions or refresh data.
+
+---
+**Examples you can paste directly:**
+- `engineering is delayed`
+- `commission budget is overrun`
+- `construction budget overrun and cpm hours overrun`
 - `qa qc exp delay = 1 and contract value > 1_000_000`
+- `cm2% forecast <= 12 or total penalties > 0`
+- `no delay in construction and total penalties = 0`
+- `eng delay = yes and hse budget is overrun`
+- `man hours are overrun or proc budget is overrun`
+- `contract value at least 2m and cm2% forecast below 10`
+- `eng delay = yes and cm2 forecast <= 100000`
+- `commission hours overrun and penalties > 0`
+- `cm2% forecast no more than 8`
+- `total delays > 3 or total penalties > 0`
+- `eng delay = no and cpm hours overrun`
+- `quality delay = 1 and contract value > 750k`
 """)
 
     mode = st.radio("Mode", ["Simple (plain language)", "Advanced (A/B/C)"], horizontal=True, key="prob_mode")
@@ -580,13 +664,18 @@ with tabs[3]:
     if mode.startswith("Simple"):
         q = st.text_input(
             "Ask in plain language",
-            placeholder="e.g., engineering is delayed and cm2% forecast under 12"
+            placeholder="e.g., engineering is delayed and commission budget is overrun"
         )
+
+        # choose outcome (try Real CM2% Deviation first if detected earlier)
         target_choices = [c for c in df.columns if "cm2" in c and "pct" in c] or list(df.columns)
         default_target = REAL_DEV_COL if (REAL_DEV_COL in target_choices) else target_choices[0]
         p_target_col = st.selectbox(
             "Outcome metric that defines 'negative margin' (< 0):",
-            target_choices, index=target_choices.index(default_target), format_func=humanize_col, key="p_target_simple"
+            target_choices,
+            index=target_choices.index(default_target),
+            format_func=humanize_col,
+            key="p_target_simple"
         )
         target_flag = (pd.to_numeric(df[p_target_col], errors="coerce") < 0).astype(int)
 
@@ -599,6 +688,8 @@ with tabs[3]:
                 base = target_flag.mean() * 100
                 if base > 0:
                     st.caption(f"Base rate (overall negative margin): {base:.1f}% • Lift: {prob/base:.2f}×")
+                else:
+                    st.caption("Base rate unavailable.")
             else:
                 st.warning("No rows matched. Try simpler wording like `eng delay = yes` or `construction budget overrun`.")
         st.divider()
@@ -607,6 +698,7 @@ with tabs[3]:
     if mode.endswith("(A/B/C)"):
         st.markdown("### Advanced")
 
+        # defaults (once)
         def ensure_defaults():
             ss = st.session_state
             ss.setdefault("p_target_col",
@@ -625,6 +717,7 @@ with tabs[3]:
             ss.setdefault("p_c2_thr", 0.0)
             ss.setdefault("p_c2_flag_val", 1)
 
+            # B/C defaults
             if "penalty_flag" not in df.columns and "total_penalties" in df.columns:
                 df["penalty_flag"] = (pd.to_numeric(df["total_penalties"], errors="coerce").fillna(0) > 0).astype(int)
 
@@ -642,6 +735,7 @@ with tabs[3]:
 
         ensure_defaults()
 
+        # quick presets
         def apply_preset(name: str):
             if name == "eng_delay_yes":
                 col = "eng_delay" if "eng_delay" in df.columns else next((c for c in df.columns if "eng" in c and "delay" in c), df.columns[0])
@@ -667,17 +761,21 @@ with tabs[3]:
                 })
             st.rerun()
 
+        # target metric
         target_choices = [c for c in df.columns if "cm2" in c and "pct" in c] or list(df.columns)
         default_target = st.session_state.get("p_target_col", (REAL_DEV_COL if REAL_DEV_COL in target_choices else target_choices[0]))
         p_target_col = st.selectbox(
             "Outcome metric that defines 'negative margin' (< 0):",
-            target_choices, index=target_choices.index(default_target), key="p_target_sel"
+            target_choices,
+            index=target_choices.index(default_target),
+            key="p_target_sel"
         )
         target_flag = (pd.to_numeric(df[p_target_col], errors="coerce") < 0).astype(int)
 
         st.markdown("### A) Probability of **negative margin** given conditions")
         colA, colB = st.columns(2)
 
+        # Condition 1
         with colA:
             c1_idx = list(df.columns).index(st.session_state.get("p_c1_col", df.columns[0]))
             c1_col = st.selectbox("Condition 1", df.columns, index=c1_idx, format_func=humanize_col, key="p_c1_col_sel")
@@ -693,6 +791,7 @@ with tabs[3]:
                 c1_desc = f"{humanize_col(c1_col)} {op} {thr}"
                 m1 = (to_flag(df[c1_col], op, float(thr)) == 1)
 
+        # Condition 2
         with colB:
             use_c2 = st.checkbox("Add Condition 2", value=st.session_state.get("p_use_c2", False), key="p_use_c2_chk")
             logic = st.radio("Logic", ["AND", "OR"], horizontal=True, index=(0 if st.session_state.get("p_logic","AND")=="AND" else 1), key="p_logic_radio")
