@@ -111,7 +111,7 @@ SERVICE_PRETTY = {
 }
 SERVICE_BLOCKS = ["tpm", "cpm", "eng", "qa_qc_exp", "hse", "constr", "com", "man", "proc"]
 
-# Flags to exclude from Drivers model (they show spurious 1s)
+# Exclude noisy flags from Drivers
 EXCLUDED_DRIVER_FLAGS = {
     # budget_overrun
     "qa_qc_exp_b_o_flag", "cpm_b_o_flag", "tpm_b_o_flag", "hse_b_o_flag",
@@ -223,7 +223,7 @@ for col in num_candidates:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-# Identify Real CM2% Deviation column once and reuse everywhere
+# Identify Real CM2% Deviation column once and reuse where we need deviation
 REAL_DEV_COL = (
     find_col(df, ["real","cm2","pct","dev"]) or
     find_col(df, ["cm2pct","real","dev"]) or
@@ -231,33 +231,21 @@ REAL_DEV_COL = (
 )
 
 # ------------------------------------------------------------
-# KPIs (use Real CM2% Deviation where "real" is referenced)
+# KPIs
+# (Only TEXT changed: label now says "Real CM2% Deviation".
+#  Calculation stays as BEFORE: cm2_actual weighted by contract_value.)
 # ------------------------------------------------------------
 total_contract = df.get("contract_value", pd.Series(dtype=float)).sum()
 total_cash = df.get("cash_received", pd.Series(dtype=float)).sum()
 weighted_fore_pct = (df.get("cm2_forecast", 0).sum() / total_contract * 100) if total_contract else 0
-
-# Weighted Real CM2% Deviation (by contract value) — fallback to simple mean if no weights
-if REAL_DEV_COL is not None:
-    dev_series = pd.to_numeric(df[REAL_DEV_COL], errors="coerce")
-    weights = pd.to_numeric(df.get("contract_value", pd.Series(index=df.index)), errors="coerce").fillna(0)
-    if (weights > 0).sum() > 0:
-        weighted_real_dev = (dev_series.fillna(0) * weights).sum() / (weights[weights > 0].sum())
-    else:
-        weighted_real_dev = dev_series.mean()
-else:
-    weighted_real_dev = np.nan
+weighted_real_pct = (df.get("cm2_actual", 0).sum() / total_contract * 100) if total_contract else 0  # unchanged
 
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1: st.metric("Projects", len(df))
 with c2: st.metric("Contract Value Σ (EUR)", f"{total_contract:,.0f}")
 with c3: st.metric("Cash Received Σ (EUR)", f"{total_cash:,.0f}")
 with c4: st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%")
-with c5:
-    if REAL_DEV_COL is not None and pd.notna(weighted_real_dev):
-        st.metric("Weighted Real CM2% Deviation", f"{weighted_real_dev:,.1f}%")
-    else:
-        st.metric("Weighted Real CM2% Deviation", "—")
+with c5: st.metric("Real CM2% Deviation (weighted)", f"{weighted_real_pct:,.1f}%" if total_contract else "—")
 
 # ------------------------------------------------------------
 # Build service-level long table
@@ -297,7 +285,7 @@ tabs = st.tabs([
 with tabs[0]:
     st.subheader("Portfolio Overview")
 
-    # Correlation heatmap (includes overruns/delays if present)
+    # Correlation heatmap
     heat_cols = [c for c in [
         "contract_value", "cash_received",
         "cm2_budget", "cm2_forecast", "cm2_actual",
@@ -314,7 +302,7 @@ with tabs[0]:
         )
         st.plotly_chart(fig, use_container_width=True, config=plotly_config("correlation_heatmap"))
 
-    # Bubble chart (x contract value, y cm2% forecast, bubble size penalties; square if zero)
+    # Bubble chart
     st.subheader("Contract Value vs CM2% Forecast (bubble = penalties)")
     df_bubble = df.copy()
     for c in ["contract_value", "cm2pct_forecast", "total_penalties"]:
@@ -343,7 +331,7 @@ with tabs[0]:
         )
         st.plotly_chart(fig, use_container_width=True, config=plotly_config("penalty_bubble"))
 
-    # Margin Scatter (simple)
+    # Margin Scatter
     st.subheader("Margin Scatter")
     ms_mode = st.radio("Y-axis:", ["CM2% Forecast", "CM2 Forecast (EUR)"], horizontal=True, key="ov_ms_mode")
     ms_y = "cm2pct_forecast" if ms_mode == "CM2% Forecast" else "cm2_forecast"
@@ -427,12 +415,11 @@ with tabs[2]:
             st.info("No data available for Real CM2% Deviation.")
 
 # ------------------------------------------------------------
-# 4) Probabilities (Sentence UI + presets)  — unique keys everywhere
+# 4) Probabilities
 # ------------------------------------------------------------
 with tabs[3]:
     st.subheader("Probabilities")
 
-    # --- defaults in session state (once) ---
     def ensure_defaults():
         ss = st.session_state
         ss.setdefault("p_target_col",
@@ -451,7 +438,6 @@ with tabs[3]:
         ss.setdefault("p_c2_thr", 0.0)
         ss.setdefault("p_c2_flag_val", 1)
 
-        # B/C defaults
         if "penalty_flag" not in df.columns and "total_penalties" in df.columns:
             df["penalty_flag"] = (pd.to_numeric(df["total_penalties"], errors="coerce").fillna(0) > 0).astype(int)
 
@@ -469,7 +455,6 @@ with tabs[3]:
 
     ensure_defaults()
 
-    # --- quick presets (update state then rerun) ---
     def apply_preset(name: str):
         if name == "eng_delay_yes":
             col = "eng_delay" if "eng_delay" in df.columns else next((c for c in df.columns if "eng" in c and "delay" in c), df.columns[0])
@@ -495,7 +480,6 @@ with tabs[3]:
             })
         st.rerun()
 
-    # ---- target metric (negative margin flag) ----
     target_choices = [c for c in df.columns if "cm2" in c and "pct" in c] or list(df.columns)
     default_target = REAL_DEV_COL if REAL_DEV_COL in target_choices else target_choices[0]
     p_target_col = st.selectbox("Outcome metric that defines 'negative margin' (< 0):",
@@ -505,7 +489,6 @@ with tabs[3]:
     st.markdown("### A) Probability of **negative margin** given conditions")
     colA, colB = st.columns(2)
 
-    # ----- Condition 1
     with colA:
         c1_idx = list(df.columns).index(st.session_state.get("p_c1_col", df.columns[0]))
         c1_col = st.selectbox("Condition 1", df.columns, index=c1_idx, format_func=humanize_col, key="p_c1_col_sel")
@@ -521,7 +504,6 @@ with tabs[3]:
             c1_desc = f"{humanize_col(c1_col)} {op} {thr}"
             m1 = (to_flag(df[c1_col], op, float(thr)) == 1)
 
-    # ----- Condition 2
     with colB:
         use_c2 = st.checkbox("Add Condition 2", value=st.session_state.get("p_use_c2", False), key="p_use_c2_chk")
         logic = st.radio("Logic", ["AND", "OR"], horizontal=True, index=(0 if st.session_state.get("p_logic","AND")=="AND" else 1), key="p_logic_radio")
@@ -571,7 +553,7 @@ with tabs[3]:
 
     st.divider()
 
-    # B) Numeric ↔ Flag (and reverse)
+    # B) Numeric ↔ Flag
     st.markdown("### B) Numeric ↔ Flag (and reverse)")
     numeric_candidates = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     flag_candidates = [c for c in df.columns if is_binary_series(df[c])]
@@ -676,7 +658,6 @@ with tabs[5]:
                 col = f"{s}_{suffix}"
                 if col in df.columns:
                     fcol = f"{s}_{suffix}_flag"
-                    # skip excluded noisy flags
                     if fcol in EXCLUDED_DRIVER_FLAGS:
                         continue
                     feat_df[fcol] = (pd.to_numeric(df[col], errors="coerce").fillna(0) > 0).astype(int)
