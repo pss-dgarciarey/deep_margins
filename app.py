@@ -18,15 +18,25 @@ from sklearn.pipeline import Pipeline
 st.set_page_config(page_title="Deep Margins", page_icon="📊", layout="wide")
 
 THEMES = {
-    "Corporate": {"bg":"#e6e9ee","card":"#ffffff","text":"#0f172a","muted":"#6b7280","accent":"#2f6feb","template":"plotly_white",
-        "font_import":"https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap",
-        "font_family":"'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial"},
-    "Ocean": {"bg":"#e6f7fb","card":"#ffffff","text":"#0b2530","muted":"#517a88","accent":""#0ea5b7","template":"plotly_white",
-        "font_import":"https://fonts.googleapis.com/css2?family=Rubik:wght@400;600;700&display=swap",
-        "font_family":"'Rubik', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial"},
+    "Corporate": {
+        "bg": "#e6e9ee", "card": "#ffffff", "text": "#0f172a", "muted": "#6b7280",
+        "accent": "#2f6feb", "template": "plotly_white",
+        "font_import": "https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap",
+        "font_family": "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
+    },
+    "Dark": {
+        "bg": "#0f172a", "card": "#111827", "text": "#e5e7eb", "muted": "#94a3b8",
+        "accent": "#84ccff", "template": "plotly_dark",
+        "font_import": "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&display=swap",
+        "font_family": "'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial",
+    },
+    "Ocean": {
+        "bg": "#e6f7fb", "card": "#ffffff", "text": "#0b2530", "muted": "#517a88",
+        "accent": "#0ea5b7", "template": "plotly_white",
+        "font_import": "https://fonts.googleapis.com/css2?family=Rubik:wght@400;600;700&display=swap",
+        "font_family": "'Rubik', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial",
+    },
 }
-# fix minor typo in Ocean accent if it occurs
-THEMES["Ocean"]["accent"] = THEMES["Ocean"].get("accent") or "#0ea5b7"
 
 def apply_theme(name: str):
     t = THEMES[name]
@@ -84,8 +94,10 @@ if not st.session_state["auth"]:
 
 # Sidebar theme selector
 st.sidebar.title("🎨 Theme")
-sel_theme = st.sidebar.selectbox("Choose Theme", list(THEMES.keys()),
-                                 index=list(THEMES.keys()).index(st.session_state["theme"]))
+sel_theme = st.sidebar.selectbox(
+    "Choose Theme", list(THEMES.keys()),
+    index=list(THEMES.keys()).index(st.session_state["theme"])
+)
 apply_theme(sel_theme)
 st.session_state["theme"] = sel_theme
 TEMPLATE = THEMES[sel_theme]["template"]
@@ -99,15 +111,9 @@ st.title("📊 Deep Margins — PSS Analytics Dashboard")
 # Helpers
 # ------------------------------------------------------------
 SERVICE_PRETTY = {
-    "tpm": "TPM",
-    "cpm": "CPM",
-    "eng": "Engineering",
-    "qa_qc_exp": "QA/QC/Exp",
-    "hse": "HSE",
-    "constr": "Construction",
-    "com": "Commissioning",
-    "man": "Manufacturing",
-    "proc": "Procurement",
+    "tpm": "TPM", "cpm": "CPM", "eng": "Engineering", "qa_qc_exp": "QA/QC/Exp",
+    "hse": "HSE", "constr": "Construction", "com": "Commissioning",
+    "man": "Manufacturing", "proc": "Procurement",
 }
 SERVICE_BLOCKS = ["tpm", "cpm", "eng", "qa_qc_exp", "hse", "constr", "com", "man", "proc"]
 
@@ -129,16 +135,12 @@ def normalize(c: str) -> str:
     return c.lower()
 
 def safe_num(x):
-    try:
-        return float(x)
-    except Exception:
-        return np.nan
+    try: return float(x)
+    except Exception: return np.nan
 
 def safe_int(v):
-    try:
-        return int(float(v))
-    except Exception:
-        return 0
+    try: return int(float(v))
+    except Exception: return 0
 
 def plotly_config(name: str):
     return {
@@ -154,11 +156,11 @@ def is_binary_series(s: pd.Series) -> bool:
 
 def to_flag(s: pd.Series, op: str, thr: float):
     s = pd.to_numeric(s, errors="coerce")
-    if op == "≥" or op == ">=": return (s >= thr).astype(int)
-    if op == ">"           :     return (s >  thr).astype(int)
-    if op == "≤" or op == "<=":  return (s <= thr).astype(int)
-    if op == "<"           :     return (s <  thr).astype(int)
-    if op == "=" or op == "==" or op == "is": return (s == thr).astype(int)
+    if op in ("≥", ">="): return (s >= thr).astype(int)
+    if op == ">": return (s > thr).astype(int)
+    if op in ("≤", "<="): return (s <= thr).astype(int)
+    if op == "<": return (s < thr).astype(int)
+    if op in ("=", "==", "is"): return (s == thr).astype(int)
     return (s > thr).astype(int)
 
 def humanize_col(c: str) -> str:
@@ -193,22 +195,13 @@ def _normalize_query_text(q: str) -> str:
 
     # comparators (phrases -> symbols)
     replacements = [
-        (r"\bno more than\b", "<="),
-        (r"\bat most\b", "<="),
-        (r"\bnot more than\b", "<="),
-        (r"\bless than or equal to\b", "<="),
-        (r"\bat least\b", ">="),
-        (r"\bnot less than\b", ">="),
+        (r"\bno more than\b", "<="), (r"\bat most\b", "<="),
+        (r"\bnot more than\b", "<="), (r"\bless than or equal to\b", "<="),
+        (r"\bat least\b", ">="), (r"\bnot less than\b", ">="),
         (r"\bgreater than or equal to\b", ">="),
-        (r"\bmore than\b", ">"),
-        (r"\bgreater than\b", ">"),
-        (r"\bover\b", ">"),
-        (r"\bunder\b", "<"),
-        (r"\bbelow\b", "<"),
-        (r"\bless than\b", "<"),
-        (r"\bequals?\b", "="),
-        (r"\bis\b", "is"),
-        (r"\bare\b", "is"),
+        (r"\bmore than\b", ">"), (r"\bgreater than\b", ">"), (r"\bover\b", ">"),
+        (r"\bunder\b", "<"), (r"\bbelow\b", "<"), (r"\bless than\b", "<"),
+        (r"\bequals?\b", "="), (r"\bis\b", "is"), (r"\bare\b", "is"),
     ]
     for pat, rep in replacements:
         q = re.sub(pat, f" {rep} ", q)
@@ -231,13 +224,13 @@ def _normalize_query_text(q: str) -> str:
     for pat, rep in synonyms.items():
         q = re.sub(pat, rep, q)
 
-    # common boolean phrases -> explicit forms (adds "= yes"/"= no" hints)
+    # boolean phrasing -> explicit
     q = re.sub(r"\bnot\s+delayed\b", "delay = no", q)
     q = re.sub(r"\bno\s+delay\b", "delay = no", q)
     q = re.sub(r"\bdelays?\b", "delay", q)
     q = re.sub(r"\b(is\s+)?delayed\b", "delay = yes", q)
 
-    # budget/hours overrun shortcuts
+    # overrun shortcuts
     q = re.sub(r"\bbudget\s*overruns?\b|\bbo\b", "b_o > 0", q)
     q = re.sub(r"\bhours\s*overruns?\b|\bho\b", "h_o > 0", q)
 
@@ -250,19 +243,20 @@ def _parse_number(text: str) -> float:
     s = s.replace("€","").replace("$","").replace("£","")
     s = s.replace(" ", "").replace("_","").replace(",", "")
 
-    # keep a single decimal point; if multiple dots, drop all as thousands
+    # if many dots, treat as thousands separators
     if s.count(".") > 1:
         s = s.replace(".", "")
 
     mult = 1.0
-    if s.endswith("k"):
-        mult, s = 1e3, s[:-1]
+    if s.endswith("bn"):
+        mult, s = 1e9, s[:-2]
+    elif s.endswith("b"):
+        mult, s = 1e9, s[:-1]
     elif s.endswith("m"):
         mult, s = 1e6, s[:-1]
-    elif s.endswith("b") or s.endswith("bn"):
-        mult, s = 1e9, s[:-1].removesuffix("n")
+    elif s.endswith("k"):
+        mult, s = 1e3, s[:-1]
 
-    # strip any lingering percent word
     s = s.replace("pct", "")
     try:
         return float(s) * mult
@@ -275,11 +269,10 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
       'engineering is delayed and cm2% forecast under 12'
       'construction budget overrun and cpm hours overrun'
       'contract value > 1.5m or total penalties > 0'
-    Supports AND/OR, operators (=, is, ==, >=, <=, >, <), and yes/no/true/false.
+    Supports AND/OR, (=, is, ==, >=, <=, >, <), yes/no/true/false, and k/m/bn suffixes.
     """
     q = _normalize_query_text(q)
 
-    # split on AND/OR (case already normalized), preserve connectors
     parts = re.split(r"\b(and|or)\b", q)
     clauses, ops = [], []
     for part in parts:
@@ -290,12 +283,11 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
         if not part:
             continue
 
-        # Try binary-style: <lhs> (=|is|==|>=|<=|>|<) <rhs>
+        # Try binary-style: <lhs> <op> <rhs>
         m = re.search(r"(.+?)\s*(=|is|==|>=|<=|>|<)\s*(.+)$", part)
         if m:
             lhs, op, rhs = [x.strip() for x in m.groups()]
             tokens = [t for t in re.split(r"[^\w]+", lhs) if t]
-            # special handling: join obvious pairs like 'cm2pct forecast'
             if "cm2pct" in tokens and "forecast" in tokens:
                 tokens = [t for t in tokens if t not in ("cm2pct","forecast")] + ["cm2pct","forecast"]
 
@@ -303,7 +295,7 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
             if col is None:
                 continue
 
-            # bool-ish RHS?
+            # boolean RHS?
             if re.fullmatch(r"(yes|true|1|no|false|0)", rhs):
                 val = 1 if rhs in ("yes","true","1") else 0
                 ser = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
@@ -318,7 +310,7 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
             clauses.append((mask, desc))
             continue
 
-        # Fallback: simple boolean intent like 'eng delay' or 'qa qc exp delay'
+        # Fallback: simple boolean intent like 'eng delay'
         tokens = [t for t in re.split(r"[^\w]+", part) if t]
         if tokens:
             col = find_col(df, tokens) or find_col(df, ["_".join(tokens)])
@@ -331,7 +323,6 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
     if not clauses:
         return pd.Series(False, index=df.index), "No conditions parsed"
 
-    # Combine with recorded ops
     mask, desc = clauses[0]
     desc_text = desc
     for (m, d), op in zip(clauses[1:], ops):
@@ -616,7 +607,6 @@ with tabs[3]:
     if mode.endswith("(A/B/C)"):
         st.markdown("### Advanced")
 
-        # --- defaults in session state (once) ---
         def ensure_defaults():
             ss = st.session_state
             ss.setdefault("p_target_col",
@@ -635,26 +625,18 @@ with tabs[3]:
             ss.setdefault("p_c2_thr", 0.0)
             ss.setdefault("p_c2_flag_val", 1)
 
-            # B/C defaults
             if "penalty_flag" not in df.columns and "total_penalties" in df.columns:
                 df["penalty_flag"] = (pd.to_numeric(df["total_penalties"], errors="coerce").fillna(0) > 0).astype(int)
 
             numeric_candidates = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
             flag_candidates = [c for c in df.columns if is_binary_series(df[c])]
-            if numeric_candidates:
-                ss.setdefault("b_num", numeric_candidates[0])
-                ss.setdefault("c_num", numeric_candidates[0])
-            else:
-                ss.setdefault("b_num", df.columns[0])
-                ss.setdefault("c_num", df.columns[0])
+            ss.setdefault("b_num", numeric_candidates[0] if numeric_candidates else df.columns[0])
             ss.setdefault("b_op", "≥")
             ss.setdefault("b_thr", 0.0)
-            if flag_candidates:
-                ss.setdefault("b_flag", flag_candidates[0])
-                ss.setdefault("c_flag", flag_candidates[0])
-            else:
-                ss.setdefault("b_flag", df.columns[0])
-                ss.setdefault("c_flag", df.columns[0])
+            ss.setdefault("b_flag", flag_candidates[0] if flag_candidates else df.columns[0])
+
+            ss.setdefault("c_flag", flag_candidates[0] if flag_candidates else df.columns[0])
+            ss.setdefault("c_num", numeric_candidates[0] if numeric_candidates else df.columns[0])
             ss.setdefault("c_op", "≥")
             ss.setdefault("c_thr", 0.0)
 
@@ -685,17 +667,17 @@ with tabs[3]:
                 })
             st.rerun()
 
-        # ---- target metric (negative margin flag) ----
         target_choices = [c for c in df.columns if "cm2" in c and "pct" in c] or list(df.columns)
         default_target = st.session_state.get("p_target_col", (REAL_DEV_COL if REAL_DEV_COL in target_choices else target_choices[0]))
-        p_target_col = st.selectbox("Outcome metric that defines 'negative margin' (< 0):",
-                                    target_choices, index=target_choices.index(default_target), key="p_target_sel")
+        p_target_col = st.selectbox(
+            "Outcome metric that defines 'negative margin' (< 0):",
+            target_choices, index=target_choices.index(default_target), key="p_target_sel"
+        )
         target_flag = (pd.to_numeric(df[p_target_col], errors="coerce") < 0).astype(int)
 
         st.markdown("### A) Probability of **negative margin** given conditions")
         colA, colB = st.columns(2)
 
-        # ----- Condition 1
         with colA:
             c1_idx = list(df.columns).index(st.session_state.get("p_c1_col", df.columns[0]))
             c1_col = st.selectbox("Condition 1", df.columns, index=c1_idx, format_func=humanize_col, key="p_c1_col_sel")
@@ -711,7 +693,6 @@ with tabs[3]:
                 c1_desc = f"{humanize_col(c1_col)} {op} {thr}"
                 m1 = (to_flag(df[c1_col], op, float(thr)) == 1)
 
-        # ----- Condition 2
         with colB:
             use_c2 = st.checkbox("Add Condition 2", value=st.session_state.get("p_use_c2", False), key="p_use_c2_chk")
             logic = st.radio("Logic", ["AND", "OR"], horizontal=True, index=(0 if st.session_state.get("p_logic","AND")=="AND" else 1), key="p_logic_radio")
