@@ -1,5 +1,5 @@
 # ================================================================
-# app.py — Deep Margins Dashboard (with login + theme integration)
+# app.py — Deep Margins Dashboard (login, themes, NL probabilities)
 # ================================================================
 
 import io
@@ -183,9 +183,11 @@ def find_col(df: pd.DataFrame, must_contain):
             return c
     return None
 
-# ---------- Natural-language helpers for Probabilities (Simple mode) ----------
+# ---------- Natural-language helpers (Simple mode) ----------
 def _normalize_query_text(q: str) -> str:
+    """Make free text more machine-friendly and inject operators for common phrases."""
     q = q.lower().strip()
+
     # keep trailing part after cue words
     m = re.search(r"\b(when|if|given|where)\b(.*)$", q)
     if m: q = m.group(2).strip()
@@ -206,11 +208,11 @@ def _normalize_query_text(q: str) -> str:
     for pat, rep in replacements:
         q = re.sub(pat, f" {rep} ", q)
 
-    # service synonyms
+    # service synonyms (broad net: include common misspellings)
     synonyms = {
         r"\bconstruction\b": "constr",
         r"\bengineering\b": "eng",
-        r"\bcommissioning\b|\bcommisioning\b": "com",
+        r"\bcommissioning\b|\bcommisioning\b|\bcommission\b": "com",
         r"\bmanufacturing\b": "man",
         r"\bprocurement\b": "proc",
         r"\bqa\s*/?\s*qc\s*/?\s*exp\b|\bquality\b": "qa_qc_exp",
@@ -230,9 +232,18 @@ def _normalize_query_text(q: str) -> str:
     q = re.sub(r"\bdelays?\b", "delay", q)
     q = re.sub(r"\b(is\s+)?delayed\b", "delay = yes", q)
 
-    # overrun shortcuts
-    q = re.sub(r"\bbudget\s*overruns?\b|\bbo\b", "b_o > 0", q)
-    q = re.sub(r"\bhours\s*overruns?\b|\bho\b", "h_o > 0", q)
+    # overrun shortcuts (very forgiving)
+    # budget
+    q = re.sub(r"\bbudget\s+over[-\s]?run(s)?\b", "b_o > 0", q)
+    q = re.sub(r"\bbudget\s+(is|was|are|were)\s+over[-\s]?run(s)?\b", "b_o > 0", q)
+    q = re.sub(r"\b(over\s+budget|blew\s+the\s+budget|ran\s+over\s+budget)\b", "b_o > 0", q)
+    # hours
+    q = re.sub(r"\bhours?\s+over[-\s]?run(s)?\b", "h_o > 0", q)
+    q = re.sub(r"\bhours?\s+(is|was|are|were)\s+over[-\s]?run(s)?\b", "h_o > 0", q)
+    q = re.sub(r"\b(over\s+hours|overran\s+hours|blew\s+the\s+hours)\b", "h_o > 0", q)
+    # SERVICE + budget/hours phrase -> inject service token + metric
+    q = re.sub(r"\b([a-z_]+)\s+budget\s+(is\s+|was\s+|are\s+|were\s+)?over[-\s]?run(s)?\b", r"\1 b_o > 0", q)
+    q = re.sub(r"\b([a-z_]+)\s+hours?\s+(is\s+|was\s+|are\s+|were\s+)?over[-\s]?run(s)?\b", r"\1 h_o > 0", q)
 
     # tidy spaces
     q = re.sub(r"\s+", " ", q).strip()
@@ -242,11 +253,8 @@ def _parse_number(text: str) -> float:
     s = text.strip().lower()
     s = s.replace("€","").replace("$","").replace("£","")
     s = s.replace(" ", "").replace("_","").replace(",", "")
-
-    # if many dots, treat as thousands separators
-    if s.count(".") > 1:
+    if s.count(".") > 1:  # many dots -> thousands separators
         s = s.replace(".", "")
-
     mult = 1.0
     if s.endswith("bn"):
         mult, s = 1e9, s[:-2]
@@ -256,25 +264,24 @@ def _parse_number(text: str) -> float:
         mult, s = 1e6, s[:-1]
     elif s.endswith("k"):
         mult, s = 1e3, s[:-1]
-
     s = s.replace("pct", "")
     try:
         return float(s) * mult
     except Exception:
         return np.nan
 
-def parse_query_to_mask(q: str, df: pd.DataFrame):
+def parse_query_to_mask(q: str, df: pd.DataFrame, return_details: bool = False):
     """
     Parse natural phrases like:
-      'engineering is delayed and cm2% forecast under 12'
+      'engineering hours is overrun and commissioning budget is overrun'
       'construction budget overrun and cpm hours overrun'
       'contract value > 1.5m or total penalties > 0'
     Supports AND/OR, (=, is, ==, >=, <=, >, <), yes/no/true/false, and k/m/bn suffixes.
     """
-    q = _normalize_query_text(q)
+    normalized = _normalize_query_text(q)
 
-    parts = re.split(r"\b(and|or)\b", q)
-    clauses, ops = [], []
+    parts = re.split(r"\b(and|or)\b", normalized)
+    clauses, ops, details = [], [], []
     for part in parts:
         part = part.strip()
         if part in ("and", "or"):
@@ -288,11 +295,14 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
         if m:
             lhs, op, rhs = [x.strip() for x in m.groups()]
             tokens = [t for t in re.split(r"[^\w]+", lhs) if t]
+            # special correction for "cm2pct forecast"
             if "cm2pct" in tokens and "forecast" in tokens:
                 tokens = [t for t in tokens if t not in ("cm2pct","forecast")] + ["cm2pct","forecast"]
 
+            # try exact token match, then joined underscore fallback
             col = find_col(df, tokens) or find_col(df, ["_".join(tokens)])
             if col is None:
+                details.append({"raw": part, "parsed": None, "reason": "no column"})
                 continue
 
             # boolean RHS?
@@ -307,7 +317,9 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
                 mask = (to_flag(ser, op, float(thr)) == 1)
                 sym = op if op in ("<=",">=","<",">","=","is","==") else op
                 desc = f"{humanize_col(col)} {sym} {thr:g}"
+
             clauses.append((mask, desc))
+            details.append({"raw": part, "parsed": {"col": col, "op": op, "rhs": rhs}, "n": int(mask.sum())})
             continue
 
         # Fallback: simple boolean intent like 'eng delay'
@@ -319,9 +331,13 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
                 mask = (ser == 1)
                 desc = f"{humanize_col(col)} = Yes"
                 clauses.append((mask, desc))
+                details.append({"raw": part, "parsed": {"col": col, "op": "=", "rhs": 1}, "n": int(mask.sum())})
+            else:
+                details.append({"raw": part, "parsed": None, "reason": "no column"})
 
     if not clauses:
-        return pd.Series(False, index=df.index), "No conditions parsed"
+        out = pd.Series(False, index=df.index)
+        return (out, "No conditions parsed", details, normalized) if return_details else (out, "No conditions parsed")
 
     mask, desc = clauses[0]
     desc_text = desc
@@ -333,7 +349,7 @@ def parse_query_to_mask(q: str, df: pd.DataFrame):
             mask = mask | m
             desc_text = f"{desc_text} OR {d}"
 
-    return mask, desc_text
+    return (mask, desc_text, details, normalized) if return_details else (mask, desc_text)
 
 # ------------------------------------------------------------
 # Data load + filters
@@ -378,7 +394,7 @@ REAL_DEV_COL = (
 )
 
 # ------------------------------------------------------------
-# KPIs (only the LABEL changed; calculation unchanged)
+# KPIs (label only changed, calculation unchanged)
 # ------------------------------------------------------------
 total_contract = df.get("contract_value", pd.Series(dtype=float)).sum()
 total_cash = df.get("cash_received", pd.Series(dtype=float)).sum()
@@ -469,11 +485,7 @@ with tabs[0]:
             symbol=["square" if not p else "circle" for p in df_bubble["has_penalty"]],
             line=dict(width=0.4, color="rgba(0,0,0,0.3)")
         ))
-        fig.update_layout(
-            xaxis_title="Contract Value (EUR)",
-            yaxis_title="CM2% Forecast",
-            plot_bgcolor="white", paper_bgcolor="white"
-        )
+        fig.update_layout(xaxis_title="Contract Value (EUR)", yaxis_title="CM2% Forecast")
         st.plotly_chart(fig, use_container_width=True, config=plotly_config("penalty_bubble"))
 
     # Margin Scatter
@@ -581,15 +593,16 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
 - `no delay in construction`  *(interpreted as `Construction delay = No`)*
 
 **Budget overruns**
-- `commission budget is overrun`
+- `commissioning budget is overrun`
 - `construction budget overrun`
 - `constr bo > 0`  *(shorthand)*
 - `qa qc exp budget is over-run`
-- `hse budget overruns`
+- `hse ran over budget`
 
 **Hours overruns**
+- `engineering hours is overrun`
 - `cpm hours are overrun`
-- `man hours overrun`
+- `man blew the hours`
 - `eng ho > 0`  *(shorthand)*
 
 **Penalties / delays totals**
@@ -602,13 +615,13 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
 - `contract value no more than 750k`
 - `contract value at least 2m`
 
-**CM2% metrics**
+**CM2 metrics**
 - `cm2% forecast under 12`
 - `cm2pct forecast <= 8`
 - `cm2 forecast <= 100000`
 
 **Combine conditions**
-- `engineering is delayed and commission budget is overrun`
+- `engineering hours is overrun and commissioning budget is overrun`
 - `construction budget overrun and cpm hours overrun`
 - `cm2% forecast <= 12 or total penalties > 0`
 - `contract value > 2m and eng delay = yes`
@@ -616,7 +629,7 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
 - `eng delay = yes or hse budget is overrun`
 
 **Service name synonyms it understands**
-- `commission` → Commissioning (`com`)
+- `commission` / `commissioning` → Commissioning (`com`)
 - `engineering` → Engineering (`eng`)
 - `construction` → Construction (`constr`)
 - `quality` / `qa qc exp` → QA/QC/Exp
@@ -636,13 +649,13 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
 ### Reading the result
 - The green box is **P(negative margin | your conditions)** with **n** = rows matching.  
 - Compare it to the **Base rate** shown below to see lift (risk increase).
-
-**Tip:** If n < ~20, treat as noisy. Tighten/loosen your conditions or refresh data.
+**Tip:** If n < ~20, treat as noisy.
 
 ---
 **Examples you can paste directly:**
 - `engineering is delayed`
-- `commission budget is overrun`
+- `commissioning budget is overrun`
+- `engineering hours is overrun`
 - `construction budget overrun and cpm hours overrun`
 - `qa qc exp delay = 1 and contract value > 1_000_000`
 - `cm2% forecast <= 12 or total penalties > 0`
@@ -664,7 +677,7 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
     if mode.startswith("Simple"):
         q = st.text_input(
             "Ask in plain language",
-            placeholder="e.g., engineering is delayed and commission budget is overrun"
+            placeholder="e.g., engineering hours is overrun and commissioning budget is overrun"
         )
 
         # choose outcome (try Real CM2% Deviation first if detected earlier)
@@ -672,15 +685,24 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
         default_target = REAL_DEV_COL if (REAL_DEV_COL in target_choices) else target_choices[0]
         p_target_col = st.selectbox(
             "Outcome metric that defines 'negative margin' (< 0):",
-            target_choices,
-            index=target_choices.index(default_target),
-            format_func=humanize_col,
-            key="p_target_simple"
+            target_choices, index=target_choices.index(default_target),
+            format_func=humanize_col, key="p_target_simple"
         )
         target_flag = (pd.to_numeric(df[p_target_col], errors="coerce") < 0).astype(int)
 
+        show_diag = st.checkbox("Show parsing details", value=True)
         if q:
-            mask, desc = parse_query_to_mask(q, df)
+            mask, desc, details, normalized = parse_query_to_mask(q, df, return_details=True)
+            if show_diag:
+                st.caption(f"Normalized: `{normalized}`")
+                if details:
+                    with st.expander("Recognized conditions & matches"):
+                        for d in details:
+                            if d.get("parsed"):
+                                st.write(f"- **{d['raw']}** → `{d['parsed']['col']}` ({d['parsed']['op']} {d['parsed']['rhs']}) • matches: **{d.get('n',0)}**")
+                            else:
+                                st.write(f"- **{d['raw']}** → *(not recognized: {d.get('reason','?')})*")
+
             n = int(mask.sum())
             if n > 0:
                 prob = target_flag[mask].mean() * 100
@@ -688,10 +710,8 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
                 base = target_flag.mean() * 100
                 if base > 0:
                     st.caption(f"Base rate (overall negative margin): {base:.1f}% • Lift: {prob/base:.2f}×")
-                else:
-                    st.caption("Base rate unavailable.")
             else:
-                st.warning("No rows matched. Try simpler wording like `eng delay = yes` or `construction budget overrun`.")
+                st.warning("No rows matched. Try loosening conditions or check the diagnostics above to see which clause matched zero rows.")
         st.divider()
 
     # ----------------- ADVANCED (A/B/C) -----------------
