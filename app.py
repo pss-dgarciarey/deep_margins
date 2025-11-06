@@ -969,7 +969,7 @@ with tabs[6]:
 with tabs[7]:
     st.subheader("Project Analyzer — heuristic + model probability + CM2% estimate")
 
-    # Which column identifies a project?
+    # Identify the project column
     name_col_guess = next((c for c in ["name", "project_name", "project", "project_id"] if c in df.columns), None)
     if name_col_guess is None:
         st.info("No project name/id column found.")
@@ -984,7 +984,7 @@ with tabs[7]:
             sel_idx = row.index[0]
             r = row.iloc[0]
 
-            # ---------------- Heuristic risk score ----------------
+            # ---------------- Heuristic risk (5-level) ----------------
             score_box = {"v": 0}
             notes = []
 
@@ -998,11 +998,11 @@ with tabs[7]:
             add((r.get("total_o", 0) or 0) > 0, 1, "Hours overrun total > 0")
             add((r.get("total_delays", 0) or 0) > 0, 1, "Delays total > 0")
 
-            # Any service has flag?
+            # Any service flags
             def any_flag(row_s, suffix):
-                for s in SERVICE_BLOCKS:
-                    v = row_s.get(f"{s}_{suffix}", 0)
-                    if pd.to_numeric(pd.Series([v]), errors="coerce").fillna(0).iloc[0] > 0:
+                for s_ in SERVICE_BLOCKS:
+                    v_ = row_s.get(f"{s_}_{suffix}", 0)
+                    if pd.to_numeric(pd.Series([v_]), errors="coerce").fillna(0).iloc[0] > 0:
                         return True
                 return False
 
@@ -1010,36 +1010,53 @@ with tabs[7]:
             add(any_flag(r, "h_o"), 2, "Hours overrun in at least one service")
             add(any_flag(r, "delay"), 2, "Delay in at least one service")
 
-            risk_band = "Low" if score_box["v"] <= 1 else ("Medium" if score_box["v"] <= 4 else "High")
-            st.metric("Heuristic risk of Non-Profitable outcome", risk_band)
+            score = score_box["v"]
+            if score <= 0:
+                risk_band = "Very low"
+            elif score <= 2:
+                risk_band = "Low"
+            elif score <= 4:
+                risk_band = "Medium"
+            elif score <= 7:
+                risk_band = "High"
+            else:
+                risk_band = "Extremely high"
 
+            st.metric("Heuristic risk of Non-Profitable outcome", risk_band)
             st.write("**Signals triggering risk:**")
             if notes:
-                for n in notes:
-                    st.write("- ", n)
+                for n in notes: st.write("- ", n)
             else:
                 st.write("- None (clean profile)")
 
-            # Snapshot of key service flags you care about
+            # Snapshot of key service flags
             focus = ["eng", "com", "proc", "man", "tpm"]
             cols = []
-            for s in focus:
-                cols += [c for c in [f"{s}_b_o", f"{s}_h_o", f"{s}_delay"] if c in df.columns]
+            for s_ in focus:
+                cols += [c for c in [f"{s_}_b_o", f"{s_}_h_o", f"{s_}_delay"] if c in df.columns]
             snap = row[cols].T
             if not snap.empty:
                 snap = snap.rename(index=lambda c: humanize_col(c))
                 st.dataframe(snap, use_container_width=True)
                 st.caption("Heuristic shown above; below: probability, risk levers, and CM2% estimate.")
 
-            # ---------------- Model P(Non-Profitable) ----------------
+            # ---------------- Probability P(Non-Profitable) (5-level) ----------------
+            def band_from_prob(pct: float) -> str:
+                if pct < 10:  return "Very low"
+                if pct < 25:  return "Low"
+                if pct < 50:  return "Medium"
+                if pct < 75:  return "High"
+                return "Extremely high"
+
+            prob_neg_val = None
             if REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 5:
                 y_all = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
 
                 # Features: service flags + totals + size
                 F = pd.DataFrame(index=df.index)
-                for s in SERVICE_BLOCKS:
-                    for suf in ["b_o", "h_o", "delay"]:
-                        coln = f"{s}_{suf}"
+                for s_ in SERVICE_BLOCKS:
+                    for suf_ in ["b_o", "h_o", "delay"]:
+                        coln = f"{s_}_{suf_}"
                         if coln in df.columns:
                             F[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
                 for cfeat in ["total_penalties", "total_delays", "total_o", "contract_value"]:
@@ -1051,14 +1068,16 @@ with tabs[7]:
                     try:
                         clf = LogisticRegression(max_iter=600, class_weight="balanced")
                         clf.fit(F, y_all)
-                        prob_neg = clf.predict_proba(F.loc[[sel_idx]])[0, 1] * 100.0
-                        st.metric("Probability project ends Non-Profitable", f"{prob_neg:.1f}%")
+                        prob_neg_val = float(clf.predict_proba(F.loc[[sel_idx]])[0, 1] * 100.0)
+                        band = band_from_prob(prob_neg_val)
+                        st.metric("Probability project ends Non-Profitable", f"{band} ({prob_neg_val:.1f}%)")
                     except Exception as e:
                         st.info(f"Couldn't fit probability model: {e}")
                 else:
                     st.info("Not enough variation to fit probability model.")
             else:
                 st.info("Outcome column not available to fit probability model.")
+            st.session_state["prob_neg_val"] = prob_neg_val
 
             # ---------------- Heuristic risk levers ----------------
             st.markdown("#### Heuristic risk levers (what to change first)")
@@ -1068,9 +1087,9 @@ with tabs[7]:
                     y_all = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
 
                     F = pd.DataFrame(index=df.index)
-                    for s in SERVICE_BLOCKS:
-                        for suf in ["b_o", "h_o", "delay"]:
-                            coln = f"{s}_{suf}"
+                    for s_ in SERVICE_BLOCKS:
+                        for suf_ in ["b_o", "h_o", "delay"]:
+                            coln = f"{s_}_{suf_}"
                             if coln in df.columns:
                                 F[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
                     for cfeat in ["total_penalties", "total_delays", "total_o", "contract_value"]:
@@ -1080,7 +1099,7 @@ with tabs[7]:
 
                     projF = F.loc[sel_idx]
 
-                    # Flag levers: where having the flag is more common among negative outcomes
+                    # Flag levers: more common among negative outcomes
                     flag_cols = [c for c in F.columns if c.endswith("_flag")]
                     for c in flag_cols:
                         r_neg = F.loc[y_all == 1, c].mean() if (y_all == 1).any() else 0.0
@@ -1094,7 +1113,7 @@ with tabs[7]:
                                 "Suggestion": "Avoid / resolve",
                             })
 
-                    # Numeric totals levers: compare project value to medians of pos/neg groups
+                    # Numeric totals levers
                     for c in ["total_penalties", "total_delays", "total_o"]:
                         if c in F.columns:
                             val = float(projF[c])
@@ -1123,43 +1142,106 @@ with tabs[7]:
             except Exception as e:
                 st.info(f"Couldn't compute heuristic levers: {e}")
 
-            # ----- Estimated CM2% Forecast (signals-based, calibrated) -----
-            st.markdown("#### Estimated CM2% Forecast (signals-based)")
-            fore_col = (
-                find_col(df, ["cm2pct", "forecast"]) or
-                find_col(df, ["cm2", "pct", "forecast"]) or
-                "cm2pct_forecast"
+            # ---------------- Estimated CM2% (signals-based, calibrated & anchored) ----------------
+            st.markdown("#### Estimated CM2% (signals-based)")
+
+            # Prefer REAL outcome if present; fallback to forecast
+            target_col = REAL_DEV_COL if (REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 8) else (
+                find_col(df, ["cm2pct","forecast"]) or "cm2pct_forecast"
             )
-            
-            if fore_col in df.columns:
-                y_fore = pd.to_numeric(df[fore_col], errors="coerce")
-                mask = y_fore.notna()
-            
-                # Selected row index for prediction
-                sel_idx = row.index[0]
-            
-                # Build features for regression
+
+            if target_col not in df.columns:
+                st.info("No target column (real or forecast) found to train an estimator.")
+            else:
+                y_target = pd.to_numeric(df[target_col], errors="coerce")
+                mask = y_target.notna()
+
+                # Build features
                 F_fore = pd.DataFrame(index=df.index)
-                for s in SERVICE_BLOCKS:
-                    for suf in ["b_o", "h_o", "delay"]:
-                        coln = f"{s}_{suf}"
-                        if coln in df.columns:
-                            F_fore[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
-                for cfeat in ["total_penalties", "total_delays", "total_o", "contract_value"]:
-                    if cfeat in df.columns:
-                        F_fore[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
+                for s_ in SERVICE_BLOCKS:
+                    for suf_ in ["b_o", "h_o", "delay"]:
+                        coln_ = f"{s_}_{suf_}"
+                        if coln_ in df.columns:
+                            F_fore[f"{coln_}_flag"] = (pd.to_numeric(df[coln_], errors="coerce").fillna(0) > 0).astype(int)
+                for cfeat_ in ["total_penalties", "total_delays", "total_o", "contract_value"]:
+                    if cfeat_ in df.columns:
+                        F_fore[cfeat_] = pd.to_numeric(df[cfeat_], errors="coerce").fillna(0)
                 F_fore = F_fore.fillna(0)
-            
+
                 F_reg = F_fore.loc[mask]
-                y_reg = y_fore.loc[mask]
-            
+                y_reg = y_target.loc[mask]
+
                 if F_reg.shape[0] >= 8 and F_reg.shape[1] > 0:
                     try:
+                        # Base model
                         reg = Pipeline([("scaler", StandardScaler()), ("reg", Ridge(alpha=1.0))])
                         reg.fit(F_reg, y_reg)
-            
-                        # In-sample diagnostics (manual R² – avoids sklearn.metrics dependency)
+
+                        # In-sample predictions
                         y_hat_train = reg.predict(F_reg)
+
+                        # Linear calibration
+                        try:
+                            slope, intercept = np.polyfit(y_hat_train, y_reg, 1)
+                        except Exception:
+                            slope, intercept = 1.0, 0.0
+
+                        # Quantile mapping (non-parametric correction)
+                        qs = np.linspace(0, 1, 11)
+                        edges = np.quantile(y_hat_train, qs)
+                        edges = np.unique(edges)
+                        if edges.size < 3:
+                            edges = np.array([y_hat_train.min(), y_hat_train.mean(), y_hat_train.max()])
+                        centers = (edges[:-1] + edges[1:]) / 2
+
+                        med_targets = []
+                        for i in range(len(edges) - 1):
+                            lo, hi = edges[i], edges[i+1]
+                            if i == len(edges) - 2:
+                                sel_bin = (y_hat_train >= lo) & (y_hat_train <= hi)
+                            else:
+                                sel_bin = (y_hat_train >= lo) & (y_hat_train < hi)
+                            m = np.median(y_reg[sel_bin]) if sel_bin.any() else np.nan
+                            med_targets.append(m)
+                        med_targets = np.array(med_targets)
+                        if np.isnan(med_targets).any():
+                            ok = ~np.isnan(med_targets)
+                            med_targets = np.interp(np.arange(len(med_targets)), np.where(ok)[0], med_targets[ok])
+
+                        # Predict for selected project
+                        base_pred = float(reg.predict(F_fore.loc[[sel_idx]])[0])
+
+                        # Apply calibration and quantile mapping
+                        cal_pred = slope * base_pred + intercept
+                        qm_pred = np.interp(base_pred, centers, med_targets, left=med_targets[0], right=med_targets[-1])
+
+                        # Blend (give more weight to non-param mapping)
+                        yhat = 0.6 * qm_pred + 0.4 * cal_pred
+
+                        # Anchor by P(Non-Profitable) if available and REAL target exists
+                        pneg = st.session_state.get("prob_neg_val", None)
+                        if pneg is not None and REAL_DEV_COL:
+                            y_all_full = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
+                            pos_med = float(pd.to_numeric(y_target[y_all_full == 0], errors="coerce").median())
+                            neg_med = float(pd.to_numeric(y_target[y_all_full == 1], errors="coerce").median())
+                            p = max(0.0, min(1.0, pneg / 100.0))
+                            if p >= 0.5:
+                                w = min(1.0, (p - 0.5) / 0.35)  # ramps 50%→85% to w≈1
+                                yhat = (1 - w) * yhat + w * neg_med
+                            else:
+                                w = min(1.0, (0.5 - p) / 0.35)
+                                yhat = (1 - w) * yhat + w * pos_med)
+
+                        # Clip to sensible range and soften extremes
+                        q02, q50, q98 = np.nanpercentile(y_reg, [2, 50, 98])
+                        yhat = max(q02, min(q98, yhat))
+                        yhat = q50 + 0.85 * (yhat - q50)
+
+                        st.metric(
+                            f"Estimated CM2% ({'real' if target_col==REAL_DEV_COL else 'forecast'} target, calibrated)",
+                            f"{yhat:.1f}%"
+                        )
+                        # Optional: quick R² without relying on sklearn.metrics
                         def _r2(y_true, y_pred):
                             y_true = np.asarray(y_true, dtype=float)
                             y_pred = np.asarray(y_pred, dtype=float)
@@ -1169,35 +1251,12 @@ with tabs[7]:
                             ss_tot = np.sum((y_true - y_true.mean()) ** 2)
                             return 1.0 * (1 - ss_res / ss_tot) if ss_tot > 0 else np.nan
                         r2 = _r2(y_reg, y_hat_train)
-            
-                        # Linear calibration to correct optimism/pessimism at extremes
-                        try:
-                            slope, intercept = np.polyfit(y_hat_train, y_reg, 1)
-                        except Exception:
-                            slope, intercept = 1.0, 0.0
-            
-                        # Predict for selected project
-                        yhat = float(reg.predict(F_fore.loc[[sel_idx]])[0])
-                        yhat = slope * yhat + intercept  # calibrated
-            
-                        # Clip to 5–95th pct and shrink toward the median slightly
-                        q05, q50, q95 = np.nanpercentile(y_reg, [5, 50, 95])
-                        yhat = max(q05, min(q95, yhat))
-                        yhat = q50 + 0.85 * (yhat - q50)
-            
-                        # Consistency tweak using heuristic risk band if present
-                        rb = locals().get("risk_band", None)
-                        if rb == "High":
-                            yhat -= 1.0
-                        elif rb == "Low":
-                            yhat += 0.5
-            
-                        st.metric("Estimated CM2% (signals-based)", f"{yhat:.1f}%")
-                        r2_text = "—" if (r2 is None or (isinstance(r2, float) and np.isnan(r2))) else f"{r2:.2f}"
-                        st.caption(f"Calibrated (linear fit + 5–95% clip). In-sample R² = {r2_text}. Uses signals only, not the file’s CM2% forecast.")
+                        st.caption(
+                            f"Targets real CM2% when available; otherwise forecast. "
+                            f"Linear + quantile calibration, probability-anchored; clipped to 2–98th pct. "
+                            f"In-sample R² = {('—' if (r2 is None or (isinstance(r2, float) and np.isnan(r2))) else f'{r2:.2f}')}."
+                        )
                     except Exception as e:
                         st.info(f"Couldn't fit CM2% estimator: {e}")
                 else:
                     st.info("Not enough rows/columns to fit CM2% estimator.")
-            else:
-                st.info("No CM2% forecast column found to train an estimator.")
