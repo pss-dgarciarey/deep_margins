@@ -1,3 +1,7 @@
+#This code is poperty of Power Service Solutions GmbH. 
+#The use, download, distribution os benefit in any way via the use of it without the explicit consent of Power Service Solutions GmbH constitutes a breach in the intelectual property law.
+#This code was developed, tested and deployed by Daniel Garcia Rey
+
 import re
 import numpy as np
 import pandas as pd
@@ -387,7 +391,7 @@ with tabs[3]:
 with tabs[4]:
     st.subheader("Overrun & Delay density heatmap")
     svc_filtered = svc[~svc["service"].isin(["MAN", "PROC"])]
-    heat = svc_filtered.groupby("service")["h_o", "b_o", "delay"].mean().reset_index() if not svc_filtered.empty else pd.DataFrame()
+    heat = svc_filtered.groupby("service")[["h_o", "b_o", "delay"]].mean().reset_index() if not svc_filtered.empty else pd.DataFrame()
     if not heat.empty:
         heat["Service"] = heat["service"].map(PRETTY_UP)
         melt = heat.melt(id_vars="Service", var_name="Type", value_name="Rate")
@@ -685,13 +689,12 @@ with tabs[7]:
         else:
             r = row.iloc[0]
             # Heuristic scoring
-            score = 0
+            score_box = {"v": 0}
             notes = []
 
             def add(flag, pts, label):
-                nonlocal score
                 if flag:
-                    score += pts
+                    score_box["v"] += pts
                     notes.append(f"+{pts}: {label}")
 
             # Portfolio-level flags
@@ -711,7 +714,7 @@ with tabs[7]:
             add(any_flag(r, "h_o"), 2, "Hours overrun in at least one service")
             add(any_flag(r, "delay"), 2, "Delay in at least one service")
 
-            risk_band = "Low" if score <= 1 else ("Medium" if score <= 4 else "High")
+            risk_band = "Low" if score_box["v"] <= 1 else ("Medium" if score_box["v"] <= 4 else "High")
             st.metric("Heuristic risk (negative margin)", risk_band)
             st.write("**Signals triggering risk:**")
             if notes:
@@ -730,3 +733,4 @@ with tabs[7]:
                 st.dataframe(snap, use_container_width=True)
 
             st.caption("Heuristic: no CM2% forecast used for prediction; this is a rules-based signal summary.")
+
