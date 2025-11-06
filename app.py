@@ -1123,17 +1123,22 @@ with tabs[7]:
             except Exception as e:
                 st.info(f"Couldn't compute heuristic levers: {e}")
 
-            # ---------------- Estimated CM2% Forecast (signals-based, calibrated) ----------------
+            # ----- Estimated CM2% Forecast (signals-based, calibrated) -----
             st.markdown("#### Estimated CM2% Forecast (signals-based)")
             fore_col = (
                 find_col(df, ["cm2pct", "forecast"]) or
                 find_col(df, ["cm2", "pct", "forecast"]) or
                 "cm2pct_forecast"
             )
+            
             if fore_col in df.columns:
                 y_fore = pd.to_numeric(df[fore_col], errors="coerce")
                 mask = y_fore.notna()
-
+            
+                # Selected row index for prediction
+                sel_idx = row.index[0]
+            
+                # Build features for regression
                 F_fore = pd.DataFrame(index=df.index)
                 for s in SERVICE_BLOCKS:
                     for suf in ["b_o", "h_o", "delay"]:
@@ -1144,40 +1149,52 @@ with tabs[7]:
                     if cfeat in df.columns:
                         F_fore[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
                 F_fore = F_fore.fillna(0)
-
+            
                 F_reg = F_fore.loc[mask]
                 y_reg = y_fore.loc[mask]
-
+            
                 if F_reg.shape[0] >= 8 and F_reg.shape[1] > 0:
                     try:
                         reg = Pipeline([("scaler", StandardScaler()), ("reg", Ridge(alpha=1.0))])
                         reg.fit(F_reg, y_reg)
-
-                        # In-sample fit & simple calibration to correct optimism/pessimism
+            
+                        # In-sample diagnostics (manual R² – avoids sklearn.metrics dependency)
                         y_hat_train = reg.predict(F_reg)
-                        r2 = r2_score(y_reg, y_hat_train) if np.isfinite(y_hat_train).all() else np.nan
+                        def _r2(y_true, y_pred):
+                            y_true = np.asarray(y_true, dtype=float)
+                            y_pred = np.asarray(y_pred, dtype=float)
+                            if y_true.size < 2 or not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
+                                return np.nan
+                            ss_res = np.sum((y_true - y_pred) ** 2)
+                            ss_tot = np.sum((y_true - y_true.mean()) ** 2)
+                            return 1.0 * (1 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+                        r2 = _r2(y_reg, y_hat_train)
+            
+                        # Linear calibration to correct optimism/pessimism at extremes
                         try:
                             slope, intercept = np.polyfit(y_hat_train, y_reg, 1)
                         except Exception:
                             slope, intercept = 1.0, 0.0
-
+            
                         # Predict for selected project
                         yhat = float(reg.predict(F_fore.loc[[sel_idx]])[0])
-                        yhat = slope * yhat + intercept  # linear calibration
-
-                        # Clip to reasonable range and shrink a touch to median
+                        yhat = slope * yhat + intercept  # calibrated
+            
+                        # Clip to 5–95th pct and shrink toward the median slightly
                         q05, q50, q95 = np.nanpercentile(y_reg, [5, 50, 95])
                         yhat = max(q05, min(q95, yhat))
-                        yhat = q50 + 0.85 * (yhat - q50)  # reduce extreme swing
-
-                        # Keep narrative consistent with heuristic risk
-                        if risk_band == "High":
+                        yhat = q50 + 0.85 * (yhat - q50)
+            
+                        # Consistency tweak using heuristic risk band if present
+                        rb = locals().get("risk_band", None)
+                        if rb == "High":
                             yhat -= 1.0
-                        elif risk_band == "Low":
+                        elif rb == "Low":
                             yhat += 0.5
-
+            
                         st.metric("Estimated CM2% (signals-based)", f"{yhat:.1f}%")
-                        st.caption(f"Calibrated (linear fit + 5–95% clip). In-sample R² = {r2:.2f}. Uses signals only, not the file’s CM2% forecast.")
+                        r2_text = "—" if (r2 is None or (isinstance(r2, float) and np.isnan(r2))) else f"{r2:.2f}"
+                        st.caption(f"Calibrated (linear fit + 5–95% clip). In-sample R² = {r2_text}. Uses signals only, not the file’s CM2% forecast.")
                     except Exception as e:
                         st.info(f"Couldn't fit CM2% estimator: {e}")
                 else:
