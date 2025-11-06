@@ -964,7 +964,7 @@ with tabs[6]:
         st.plotly_chart(figd, use_container_width=True, config=plotly_config("var_bell"))
 
 # ------------------------------------------------------------
-# 8) Project Analyzer — Probability, Heuristic, Levers, CM2% estimate
+# 8) Project Analyzer — Probability, Heuristic, Levers, Aggressive CM2% estimate
 # ------------------------------------------------------------
 with tabs[7]:
     st.subheader("Project Analyzer — Probability, Heuristic, Levers, CM2% estimate")
@@ -1037,11 +1037,6 @@ with tabs[7]:
     else:
         st.info("Outcome column not available to fit probability model.")
 
-    # Show as the main metric (per your request)
-    st.metric("Probability project ends Non-Profitable",
-              f"{band_from_prob(prob_neg_val if prob_neg_val is not None else 0.0)}"
-              + (f" ({prob_neg_val:.1f}%)" if prob_neg_val is not None else " (—)"))
-
     # ---------- SECONDARY: Heuristic (calibrated to probability scale) ----------
     # Score
     score_box = {"v": 0}
@@ -1095,6 +1090,19 @@ with tabs[7]:
             0 if score_box["v"] <= 0 else 1 if score_box["v"] <= 2 else 2 if score_box["v"] <= 4 else 3 if score_box["v"] <= 7 else 4
         ]
 
+    # Decide category (left metric) and show probability (right metric)
+    p_for_decision = prob_neg_val if prob_neg_val is not None else prob_heur
+    forecast_result = "Non-Profitable" if (p_for_decision is not None and p_for_decision >= 50) else "Profitable"
+
+    left, right = st.columns(2)
+    with left:
+        st.metric("Forecasted Result", forecast_result)
+    with right:
+        st.metric("Probability project ends Non-Profitable",
+                  f"{band_from_prob(p_for_decision if p_for_decision is not None else 0.0)}"
+                  + (f" ({p_for_decision:.1f}%)" if p_for_decision is not None else " (—)"))
+
+    # Detail the heuristic signals below
     st.caption(f"Heuristic (calibrated) — P(Non-Profitable): {band_from_prob(prob_heur)} ({prob_heur:.1f}%)")
     st.write("**Signals triggering risk:**")
     if notes:
@@ -1114,7 +1122,7 @@ with tabs[7]:
     levers_rows = []
     try:
         if REAL_DEV_COL and df[REAL_DEV_COL].notna().any():
-            y_bin = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
+            y_bin_all = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
             F = F_all.copy()
 
             projF = F.loc[[sel_idx]].iloc[0]
@@ -1122,8 +1130,8 @@ with tabs[7]:
             # Flag levers: more common among negative outcomes
             fcols = [c for c in F.columns if c.endswith("_flag")]
             for c in fcols:
-                r_neg = F.loc[y_bin == 1, c].mean() if (y_bin == 1).any() else 0.0
-                r_pos = F.loc[y_bin == 0, c].mean() if (y_bin == 0).any() else 0.0
+                r_neg = F.loc[y_bin_all == 1, c].mean() if (y_bin_all == 1).any() else 0.0
+                r_pos = F.loc[y_bin_all == 0, c].mean() if (y_bin_all == 0).any() else 0.0
                 delta_to_neg = r_neg - r_pos
                 if projF[c] == 1 and delta_to_neg > 0:
                     levers_rows.append({
@@ -1136,8 +1144,8 @@ with tabs[7]:
             for c in ["total_penalties","total_delays","total_o"]:
                 if c in F.columns:
                     val = float(projF[c])
-                    p_med = float(pd.to_numeric(df.loc[y_bin==0, c], errors="coerce").median())
-                    n_med = float(pd.to_numeric(df.loc[y_bin==1, c], errors="coerce").median())
+                    p_med = float(pd.to_numeric(df.loc[y_bin_all==0, c], errors="coerce").median())
+                    n_med = float(pd.to_numeric(df.loc[y_bin_all==1, c], errors="coerce").median())
                     if np.isfinite(val) and np.isfinite(p_med) and np.isfinite(n_med):
                         if n_med > p_med and val > p_med:
                             levers_rows.append({
@@ -1161,7 +1169,7 @@ with tabs[7]:
     except Exception as e:
         st.info(f"Couldn't compute heuristic levers: {e}")
 
-    # ---------- Estimated CM2% (signals-based, robust + isotonic calibrated, prob-anchored) ----------
+    # ---------- Estimated CM2% (signals-based, robust + isotonic, AGGRESSIVE) ----------
     st.markdown("#### Estimated CM2% (signals-based)")
     target_col = REAL_DEV_COL if (REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 8) else (
         find_col(df, ["cm2pct","forecast"]) or "cm2pct_forecast"
@@ -1187,53 +1195,56 @@ with tabs[7]:
                 ])
                 pipe.fit(X, y)
 
-                # calibration
+                # monotonic calibration on in-sample preds
                 y_hat_train = pipe.predict(X)
                 iso = IsotonicRegression(out_of_bounds="clip")
                 iso.fit(y_hat_train, y)
 
-                # tiny local R²
-                def _r2(y_true, y_pred):
-                    y_true = np.asarray(y_true, dtype=float)
-                    y_pred = np.asarray(y_pred, dtype=float)
-                    if y_true.size < 2 or not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
-                        return np.nan
-                    ss_res = float(np.sum((y_true - y_pred) ** 2))
-                    ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
-                    return (1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-                r2_cal = _r2(y, iso.predict(y_hat_train))
-
-                # predict selected project
+                # predict selected project (base)
                 base_pred = float(pipe.predict(F_all.loc[[sel_idx]])[0])
                 yhat = float(iso.predict([base_pred])[0])
 
-                # anchor by model probability if available and REAL target exists
-                if prob_neg_val is not None and REAL_DEV_COL:
-                    y_bin = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
-                    pos_med = float(pd.to_numeric(y_target[y_bin == 0], errors="coerce").median())
-                    neg_med = float(pd.to_numeric(y_target[y_bin == 1], errors="coerce").median())
-                    p = max(0.0, min(1.0, prob_neg_val / 100.0))
-                    if p >= 0.5:
-                        w = min(1.0, (p - 0.5) / 0.35)
-                        yhat = (1 - w) * yhat + w * neg_med
-                    else:
-                        w = min(1.0, (0.5 - p) / 0.35)
-                        yhat = (1 - w) * yhat + w * pos_med
+                # ---- AGGRESSIVE ADJUSTMENT ----
+                # classification for anchors
+                if REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 5:
+                    y_bin2 = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int).loc[mask]
+                else:
+                    y_bin2 = (y < 0).astype(int)  # fallback split
 
-                # clip to empirical range and soften extremes
-                q02, q50, q98 = np.nanpercentile(y, [2, 50, 98])
-                yhat = float(np.clip(yhat, q02, q98))
-                yhat = float(q50 + 0.80 * (yhat - q50))
+                pos_vals = y.loc[y_bin2 == 0]
+                neg_vals = y.loc[y_bin2 == 1]
+                overall_med = float(np.nanmedian(y))
+
+                # Extreme anchors
+                pos_anchor = float(np.nanpercentile(pos_vals, 90)) if not pos_vals.empty else float(np.nanpercentile(y, 85))
+                neg_anchor = float(np.nanpercentile(neg_vals, 10)) if not neg_vals.empty else float(np.nanpercentile(y, 15))
+
+                # Risk-driven anchor toward class extremes
+                p_use = (prob_neg_val if prob_neg_val is not None else prob_heur) / 100.0
+                p_use = max(0.0, min(1.0, p_use))
+                if p_use >= 0.5:
+                    # push toward harsher negative anchor faster (0.5→0, 0.75→1)
+                    w_anchor = min(1.0, (p_use - 0.5) / 0.25)
+                    yhat = (1 - w_anchor) * yhat + w_anchor * neg_anchor
+                else:
+                    # push toward positive anchor (0.5→0, 0.25→1)
+                    w_anchor = min(1.0, (0.5 - p_use) / 0.25)
+                    yhat = (1 - w_anchor) * yhat + w_anchor * pos_anchor
+
+                # Amplify away from median based on confidence
+                gain = 1.3 + 0.7 * abs(2 * p_use - 1)   # 1.3 → 2.0
+                yhat = float(overall_med + gain * (yhat - overall_med))
+
+                # Clip to wide empirical bounds (very light)
+                q01, q99 = np.nanpercentile(y, [1, 99])
+                yhat = float(np.clip(yhat, q01, q99))
 
                 st.metric(
-                    f"Estimated CM2% ({'real' if target_col==REAL_DEV_COL else 'forecast'} target, robust-calibrated)",
+                    f"Estimated CM2% ({'real' if target_col==REAL_DEV_COL else 'forecast'} target, aggressive)",
                     f"{yhat:.1f}%"
                 )
-                r2_txt = "—" if (isinstance(r2_cal, float) and not np.isfinite(r2_cal)) else f"{r2_cal:.2f}"
-                st.caption(
-                    f"Huber + isotonic calibration; anchored by P(negative). "
-                    f"Clipped to 2–98th pct and shrunk to median. Calibrated R² = {r2_txt}."
-                )
+                st.caption("Robust Huber + isotonic; then anchored to class extremes and amplified by risk. "
+                           "Clipped to 1–99th pct to avoid outliers.")
             except Exception as e:
                 st.info(f"Couldn't fit CM2% estimator: {e}")
         else:
