@@ -731,7 +731,8 @@ with tabs[7]:
             snap = row[cols].T
             if not snap.empty:
                 snap = snap.rename(index=lambda c: humanize_col(c))
-                st.dataframe(snap, use_container_width=True)            st.caption("Heuristic shown above; below: model probability, risk levers, and CM2% forecast estimate.")
+                st.dataframe(snap, use_container_width=True)
+                st.caption("Heuristic shown above; below: model probability, risk levers, and CM2% forecast estimate.")
 
             # ----- Model-based probability of negative margin (logistic, signals only)
             if REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 5:
@@ -818,9 +819,7 @@ with tabs[7]:
                 else:
                     st.info("No obvious single-variable risk levers detected for this project.")
             except Exception as e:
-                st.info(f"Couldn't compute heuristic levers: {e}")
-
-            # ----- Estimated CM2% Forecast from signals (Ridge)
+                st.info(f"Couldn't compute heuristic levers: {e}")            # ----- Estimated CM2% Forecast from signals (Ridge)
             st.markdown("#### Estimated CM2% Forecast (signals-based)")
             fore_col = (
                 find_col(df, ["cm2pct", "forecast"]) or
@@ -830,22 +829,24 @@ with tabs[7]:
             if fore_col in df.columns:
                 y_fore = pd.to_numeric(df[fore_col], errors="coerce")
                 mask = y_fore.notna()
-                F_reg = F.loc[mask]
+
+                # Build features fresh for regression (don't rely on earlier blocks)
+                F_fore = pd.DataFrame(index=df.index)
+                for s in SERVICE_BLOCKS:
+                    for suf in ["b_o","h_o","delay"]:
+                        coln = f"{s}_{suf}"
+                        if coln in df.columns:
+                            F_fore[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
+                for cfeat in ["total_penalties","total_delays","total_o","contract_value"]:
+                    if cfeat in df.columns:
+                        F_fore[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
+                F_fore = F_fore.fillna(0)
+
+                F_reg = F_fore.loc[mask]
                 y_reg = y_fore.loc[mask]
                 if F_reg.shape[0] >= 8 and F_reg.shape[1] > 0:
                     try:
                         reg = Pipeline([("scaler", StandardScaler()), ("reg", Ridge(alpha=1.0))])
                         reg.fit(F_reg, y_reg)
-                        yhat = float(reg.predict(F.loc[row.index])[0])
-                        r2 = r2_score(y_reg, reg.predict(F_reg))
-                        cA, cB = st.columns(2)
-                        with cA:
-                            st.metric("Estimated CM2% Forecast", f"{yhat:.2f}%")
-                        with cB:
-                            st.caption(f"In-sample R²: {r2:.2f}")
-                    except Exception as e:
-                        st.info(f"Couldn't fit CM2% model: {e}")
-                else:
-                    st.info("Not enough rows or features to estimate CM2% forecast.")
-            else:
-                st.info("CM2% Forecast column not found.")
+                        yhat = float(reg.predict(F_fore.loc[row.index])[0])
+                        
