@@ -7,9 +7,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import r2_score
 
 # ------------------------------------------------------------
 # Page + Theme Config
@@ -730,7 +731,121 @@ with tabs[7]:
             snap = row[cols].T
             if not snap.empty:
                 snap = snap.rename(index=lambda c: humanize_col(c))
-                st.dataframe(snap, use_container_width=True)
+                st.dataframe(snap, use_container_width=True)            st.caption("Heuristic shown above; below: model probability, risk levers, and CM2% forecast estimate.")
 
-            st.caption("Heuristic: no CM2% forecast used for prediction; this is a rules-based signal summary.")
+            # ----- Model-based probability of negative margin (logistic, signals only)
+            if REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 5:
+                y_all = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
+                # Build feature matrix from signals
+                F = pd.DataFrame(index=df.index)
+                for s in SERVICE_BLOCKS:
+                    for suf in ["b_o","h_o","delay"]:
+                        coln = f"{s}_{suf}"
+                        if coln in df.columns:
+                            F[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
+                for cfeat in ["total_penalties","total_delays","total_o","contract_value"]:
+                    if cfeat in df.columns:
+                        F[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
+                F = F.fillna(0)
+                if y_all.nunique() == 2 and F.shape[1] > 0:
+                    try:
+                        clf = LogisticRegression(max_iter=600, class_weight="balanced")
+                        clf.fit(F, y_all)
+                        prob_neg = clf.predict_proba(F.loc[row.index])[0][1] * 100
+                        st.metric("Model P(negative margin)", f"{prob_neg:.1f}%")
+                    except Exception as e:
+                        st.info(f"Couldn't fit probability model: {e}")
+                else:
+                    st.info("Not enough variation to fit probability model.")
+            else:
+                st.info("Outcome column not available to fit probability model.")
 
+            # ----- Heuristic risk levers (what to change first)
+            st.markdown("#### Heuristic risk levers (what to change first)")
+            levers_rows = []
+            try:
+                y_all = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
+                # Rebuild features for lever calc
+                F = pd.DataFrame(index=df.index)
+                for s in SERVICE_BLOCKS:
+                    for suf in ["b_o","h_o","delay"]:
+                        coln = f"{s}_{suf}"
+                        if coln in df.columns:
+                            F[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
+                for cfeat in ["total_penalties","total_delays","total_o","contract_value"]:
+                    if cfeat in df.columns:
+                        F[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
+                F = F.fillna(0)
+
+                projF = F.loc[row.index].iloc[0]
+                # Flag levers
+                flag_cols = [c for c in F.columns if c.endswith("_flag")]
+                for c in flag_cols:
+                    r_neg = F.loc[y_all==1, c].mean() if (y_all==1).any() else 0.0
+                    r_pos = F.loc[y_all==0, c].mean() if (y_all==0).any() else 0.0
+                    delta_to_neg = r_neg - r_pos
+                    if projF[c] == 1 and delta_to_neg > 0:
+                        levers_rows.append({
+                            "Variable": humanize_col(c.replace("_flag","")),
+                            "Project": "Yes",
+                            "Δ toward negative": delta_to_neg,
+                            "Suggestion": "Avoid / resolve",
+                        })
+                # Numeric totals levers
+                for c in ["total_penalties","total_delays","total_o"]:
+                    if c in F.columns:
+                        val = float(projF[c])
+                        p_med = float(pd.to_numeric(df.loc[y_all==0, c], errors="coerce").median())
+                        n_med = float(pd.to_numeric(df.loc[y_all==1, c], errors="coerce").median())
+                        if np.isfinite(val) and np.isfinite(p_med) and np.isfinite(n_med):
+                            if n_med > p_med and val > p_med:
+                                levers_rows.append({
+                                    "Variable": humanize_col(c),
+                                    "Project": f"{val:.2f}",
+                                    "Δ toward negative": (n_med - p_med),
+                                    "Suggestion": f"Reduce ≤ {p_med:.2f}",
+                                })
+                            elif n_med < p_med and val < p_med:
+                                levers_rows.append({
+                                    "Variable": humanize_col(c),
+                                    "Project": f"{val:.2f}",
+                                    "Δ toward negative": (p_med - n_med),
+                                    "Suggestion": f"Increase ≥ {p_med:.2f}",
+                                })
+                if levers_rows:
+                    levers_df = pd.DataFrame(levers_rows).sort_values("Δ toward negative", ascending=False).head(8)
+                    st.dataframe(levers_df, use_container_width=True)
+                else:
+                    st.info("No obvious single-variable risk levers detected for this project.")
+            except Exception as e:
+                st.info(f"Couldn't compute heuristic levers: {e}")
+
+            # ----- Estimated CM2% Forecast from signals (Ridge)
+            st.markdown("#### Estimated CM2% Forecast (signals-based)")
+            fore_col = (
+                find_col(df, ["cm2pct", "forecast"]) or
+                find_col(df, ["cm2", "pct", "forecast"]) or
+                "cm2pct_forecast"
+            )
+            if fore_col in df.columns:
+                y_fore = pd.to_numeric(df[fore_col], errors="coerce")
+                mask = y_fore.notna()
+                F_reg = F.loc[mask]
+                y_reg = y_fore.loc[mask]
+                if F_reg.shape[0] >= 8 and F_reg.shape[1] > 0:
+                    try:
+                        reg = Pipeline([("scaler", StandardScaler()), ("reg", Ridge(alpha=1.0))])
+                        reg.fit(F_reg, y_reg)
+                        yhat = float(reg.predict(F.loc[row.index])[0])
+                        r2 = r2_score(y_reg, reg.predict(F_reg))
+                        cA, cB = st.columns(2)
+                        with cA:
+                            st.metric("Estimated CM2% Forecast", f"{yhat:.2f}%")
+                        with cB:
+                            st.caption(f"In-sample R²: {r2:.2f}")
+                    except Exception as e:
+                        st.info(f"Couldn't fit CM2% model: {e}")
+                else:
+                    st.info("Not enough rows or features to estimate CM2% forecast.")
+            else:
+                st.info("CM2% Forecast column not found.")
