@@ -147,7 +147,6 @@ def humanize_col(c: str) -> str:
     return s[:1].upper() + s[1:]
 
 # ---------- Column resolver ----------
-
 def find_col(df: pd.DataFrame, must_contain):
     tokens = [t.lower() for t in must_contain if t]
     svc_tokens = set(["tpm","cpm","eng","qa_qc_exp","hse","constr","com","man","proc"])
@@ -451,7 +450,7 @@ with tabs[5]:
 # 7) PATTERNS — shared variables & variable distributions (based on CM2% Forecast)
 # ------------------------------------------------------------
 with tabs[6]:
-    st.subheader("Patterns — what profitable vs non‑profitable projects share (by CM2% Forecast)")
+    st.subheader("Patterns — what profitable vs non-profitable projects share (by CM2% Forecast)")
 
     # 1) Define profitable using CM2% Forecast threshold
     fore_col = (
@@ -478,10 +477,10 @@ with tabs[6]:
         topn = st.number_input("Top N patterns", min_value=3, max_value=20, value=8, step=1)
 
     y = (pd.to_numeric(dfx[fore_col], errors="coerce") > float(thr)).astype(int)
-    cls = y.map({1: "Profitable", 0: "Non‑Profitable"})
+    cls = y.map({1: "Profitable", 0: "Non-Profitable"})
     dfx["_class"] = cls
 
-    # 2) A quick auto-ranked view (binary + numeric) — still useful, keep it
+    # 2) A quick auto-ranked view (binary + numeric)
     def _auto_patterns(dfx, y, exclude):
         # Binary candidates
         flag_cols = [c for c in dfx.columns if is_binary_series(dfx[c]) and c not in exclude]
@@ -527,41 +526,44 @@ with tabs[6]:
     exclude = {fore_col, "project_id", "check_v"}
     bin_df, num_df = _auto_patterns(dfx.copy(), y, exclude)
 
-    with st.expander("Top patterns (auto‑ranked)", expanded=True):
+    with st.expander("Top patterns (auto-ranked)", expanded=True):
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Binary flags more common in PROFITABLE**")
             if not bin_df.empty:
                 top_bin_prof = bin_df.sort_values("Delta_pp", ascending=False).head(topn)
                 figp = px.bar(top_bin_prof, x="Delta_pp", y="Variable", orientation="h",
-                              title="Δ percentage points (Profitable − Non‑Profitable)",
+                              title="Δ percentage points (Profitable − Non-Profitable)",
                               color_discrete_sequence=px.colors.qualitative.Set2)
                 st.plotly_chart(figp, use_container_width=True, config=plotly_config("patterns_bin_prof"))
-                st.dataframe(top_bin_prof[["Variable","Rate_Profitable","Rate_NonProfitable","Delta_pp"]]
-                             .style.format({"Rate_Profitable":"{:.2%}","Rate_NonProfitable":"{:.2%}","Delta_pp":"{:+.2%}"}),
-                             use_container_width=True)
+                st.dataframe(
+                    top_bin_prof[["Variable","Rate_Profitable","Rate_NonProfitable","Delta_pp"]]
+                    .style.format({"Rate_Profitable":"{:.2%}","Rate_NonProfitable":"{:.2%}","Delta_pp":"{:+.2%}"})
+                )
             else:
                 st.info("No binary/flag variables detected.")
         with col2:
-            st.markdown("**Binary flags more common in NON‑PROFITABLE**")
+            st.markdown("**Binary flags more common in NON-PROFITABLE**")
             if not bin_df.empty:
                 top_bin_non = bin_df.sort_values("Delta_pp").head(topn)
-                fign = px.bar(top_bin_non.assign(Delta_to_Non=-top_bin_non["Delta_pp"]),
-                              x="Delta_to_Non", y="Variable", orientation="h",
-                              title="Δ toward Non‑Profitable", color_discrete_sequence=px.colors.qualitative.Set2)
+                fign = px.bar(
+                    top_bin_non.assign(Delta_to_Non=-top_bin_non["Delta_pp"]),
+                    x="Delta_to_Non", y="Variable", orientation="h",
+                    title="Δ toward Non-Profitable", color_discrete_sequence=px.colors.qualitative.Set2
+                )
                 st.plotly_chart(fign, use_container_width=True, config=plotly_config("patterns_bin_non"))
-                st.dataframe(top_bin_non[["Variable","Rate_Profitable","Rate_NonProfitable","Delta_pp"]]
-                             .style.format({"Rate_Profitable":"{:.2%}","Rate_NonProfitable":"{:.2%}","Delta_pp":"{:+.2%}"}),
-                             use_container_width=True)
+                st.dataframe(
+                    top_bin_non[["Variable","Rate_Profitable","Rate_NonProfitable","Delta_pp"]]
+                    .style.format({"Rate_Profitable":"{:.2%}","Rate_NonProfitable":"{:.2%}","Delta_pp":"{:+.2%}"})
+                )
             else:
                 st.info("No binary/flag variables detected.")
 
     st.divider()
 
-    # 3) YOUR ASK: Shared variables (categorical) + service-specific breakdown
-    st.markdown("### Shared categorical variables (at‑a‑glance)")
+    # 3) Shared variables (categorical) + service-specific breakdown
+    st.markdown("### Shared categorical variables (at-a-glance)")
 
-    # Build portfolio-level categorical flags
     cats = {}
     if "total_penalties" in dfx.columns:
         cats["Penalties > 0"] = (pd.to_numeric(dfx["total_penalties"], errors="coerce").fillna(0) > 0).astype(int)
@@ -570,7 +572,6 @@ with tabs[6]:
     if "total_delays" in dfx.columns:
         cats["Delays Total > 0"] = (pd.to_numeric(dfx["total_delays"], errors="coerce").fillna(0) > 0).astype(int)
 
-    # Any budget/hours/delay flag across services
     def any_suffix_flag(df_in: pd.DataFrame, suffix: str) -> pd.Series:
         acc = pd.Series(0, index=df_in.index)
         for s in SERVICE_BLOCKS:
@@ -597,18 +598,18 @@ with tabs[6]:
     cat_df = pd.DataFrame(cat_rows)
 
     if not cat_df.empty:
-        # Show top 5 by absolute separation; this guarantees >=3 categorical as requested
         cat_top = cat_df.reindex(cat_df["Delta_pp"].abs().sort_values(ascending=False).index).head(5)
         figc = px.bar(cat_top, x="Delta_pp", y="Variable", orientation="h",
-                      title="Shared categorical patterns (Δ Profitable − Non‑Profitable)")
+                      title="Shared categorical patterns (Δ Profitable − Non-Profitable)")
         st.plotly_chart(figc, use_container_width=True, config=plotly_config("patterns_shared_cats"))
-        st.dataframe(cat_top[["Variable","Rate_Profitable","Rate_NonProfitable","Delta_pp"]]
-                     .style.format({"Rate_Profitable":"{:.2%}","Rate_NonProfitable":"{:.2%}","Delta_pp":"{:+.2%}"}),
-                     use_container_width=True)
+        st.dataframe(
+            cat_top[["Variable","Rate_Profitable","Rate_NonProfitable","Delta_pp"]]
+            .style.format({"Rate_Profitable":"{:.2%}","Rate_NonProfitable":"{:.2%}","Delta_pp":"{:+.2%}"})
+        )
     else:
         st.info("No categorical totals/flags available.")
 
-    st.markdown("### Service‑specific patterns (b_o / h_o / delay)")
+    st.markdown("### Service-specific patterns (b_o / h_o / delay)")
     suffix = st.radio("Choose signal", ["b_o", "h_o", "delay"], horizontal=True, index=2)
 
     svc_rows = []
@@ -632,14 +633,14 @@ with tabs[6]:
             st.markdown("**Most characteristic of PROFITABLE**")
             top_p = svc_df.sort_values("Delta_pp", ascending=False).head(6)
             fig_sp = px.bar(top_p, x="Delta_pp", y="Service", orientation="h",
-                            title=f"{suffix.upper()} — Δ Profitable − Non‑Profitable")
+                            title=f"{suffix.upper()} — Δ Profitable − Non-Profitable")
             st.plotly_chart(fig_sp, use_container_width=True, config=plotly_config("svc_prof"))
             st.dataframe(top_p.style.format({"Rate_Profitable":"{:.2%}","Rate_NonProfitable":"{:.2%}","Delta_pp":"{:+.2%}"}), use_container_width=True)
         with colB:
-            st.markdown("**Most characteristic of NON‑PROFITABLE**")
+            st.markdown("**Most characteristic of NON-PROFITABLE**")
             top_n = svc_df.sort_values("Delta_pp").head(6)
             fig_sn = px.bar(top_n.assign(Delta_to_Non=-top_n["Delta_pp"]), x="Delta_to_Non", y="Service", orientation="h",
-                            title=f"{suffix.upper()} — Δ toward Non‑Profitable")
+                            title=f"{suffix.upper()} — Δ toward Non-Profitable")
             st.plotly_chart(fig_sn, use_container_width=True, config=plotly_config("svc_non"))
             st.dataframe(top_n.style.format({"Rate_Profitable":"{:.2%}","Rate_NonProfitable":"{:.2%}","Delta_pp":"{:+.2%}"}), use_container_width=True)
     else:
@@ -649,9 +650,7 @@ with tabs[6]:
 
     # 4) Variable-focused bell-style (overlay histogram) split by profit class
     st.markdown("### Variable distribution by class (choose any column)")
-    # Candidate variables: numeric + counts; show a clean pick list
     cand_vars = [c for c in dfx.columns if pd.api.types.is_numeric_dtype(dfx[c]) and c not in {fore_col}]
-    # fast aliases
     aliases = [
         c for c in ["total_penalties", "total_delays", "total_o",
                     "eng_delay", "com_delay", "proc_b_o", "eng_b_o", "man_delay", "tpm_h_o"] if c in dfx.columns
@@ -660,24 +659,22 @@ with tabs[6]:
 
     if pick:
         prof_vals = pd.to_numeric(dfx.loc[dfx["_class"]=="Profitable", pick], errors="coerce")
-        nonp_vals = pd.to_numeric(dfx.loc[dfx["_class"]=="Non‑Profitable", pick], errors="coerce")
+        nonp_vals = pd.to_numeric(dfx.loc[dfx["_class"]=="Non-Profitable", pick], errors="coerce")
         med_prof = prof_vals.median() if not prof_vals.dropna().empty else float("nan")
         med_nonp = nonp_vals.median() if not nonp_vals.dropna().empty else float("nan")
-        st.write(f"Median {humanize_col(pick)} — Profitable: **{med_prof:.2f}**, Non‑Profitable: **{med_nonp:.2f}**")
+        st.write(f"Median {humanize_col(pick)} — Profitable: **{med_prof:.2f}**, Non-Profitable: **{med_nonp:.2f}**")
         figd = px.histogram(dfx, x=pick, color="_class", barmode="overlay", nbins=20,
-                            category_orders={"_class":["Profitable","Non‑Profitable"]},
+                            category_orders={"_class":["Profitable","Non-Profitable"]},
                             labels={pick: humanize_col(pick), "_class":"Class"})
         figd.update_traces(opacity=0.70)
         st.plotly_chart(figd, use_container_width=True, config=plotly_config("var_bell"))
 
 # ------------------------------------------------------------
-# 8) Project Analyzer — heuristic (no ML training requested)
+# 8) Project Analyzer — heuristic + model + levers + CM2% estimate
 # ------------------------------------------------------------
 with tabs[7]:
     st.subheader("Project Analyzer — heuristic risk from shared patterns")
 
-    # Use simple heuristics based on the categorical patterns above
-    # (penalties>0, any b_o/h_o/delay, totals > 0) and service-specific deltas.
     name_col_guess = next((c for c in ["name", "project_name", "project", "project_id"] if c in df.columns), None)
     if name_col_guess is None:
         st.info("No project name/id column found.")
@@ -704,9 +701,9 @@ with tabs[7]:
             add((r.get("total_delays", 0) or 0) > 0, 1, "Delays total > 0")
 
             # Any service flags
-            def any_flag(row, suffix):
+            def any_flag(row_, suffix):
                 for s in SERVICE_BLOCKS:
-                    v = row.get(f"{s}_{suffix}", 0)
+                    v = row_.get(f"{s}_{suffix}", 0)
                     if pd.to_numeric(pd.Series([v]), errors="coerce").fillna(0).iloc[0] > 0:
                         return True
                 return False
@@ -719,11 +716,12 @@ with tabs[7]:
             st.metric("Heuristic risk (negative margin)", risk_band)
             st.write("**Signals triggering risk:**")
             if notes:
-                for n in notes: st.write("- ", n)
+                for n in notes:
+                    st.write("- ", n)
             else:
                 st.write("- None (clean profile)")
 
-            # Show quick service snapshot for ENG/COM/PROC/MAN/TPM as you asked
+            # Snapshot ENG/COM/PROC/MAN/TPM
             focus = ["eng", "com", "proc", "man", "tpm"]
             cols = []
             for s in focus:
@@ -734,10 +732,9 @@ with tabs[7]:
                 st.dataframe(snap, use_container_width=True)
                 st.caption("Heuristic shown above; below: model probability, risk levers, and CM2% forecast estimate.")
 
-            # ----- Model-based probability of negative margin (logistic, signals only)
+            # ----- Model P(negative) via Logistic Regression (signals only)
             if REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 5:
                 y_all = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
-                # Build feature matrix from signals
                 F = pd.DataFrame(index=df.index)
                 for s in SERVICE_BLOCKS:
                     for suf in ["b_o","h_o","delay"]:
@@ -761,12 +758,11 @@ with tabs[7]:
             else:
                 st.info("Outcome column not available to fit probability model.")
 
-            # ----- Heuristic risk levers (what to change first)
+            # ----- Heuristic risk levers
             st.markdown("#### Heuristic risk levers (what to change first)")
             levers_rows = []
             try:
                 y_all = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
-                # Rebuild features for lever calc
                 F = pd.DataFrame(index=df.index)
                 for s in SERVICE_BLOCKS:
                     for suf in ["b_o","h_o","delay"]:
@@ -819,18 +815,19 @@ with tabs[7]:
                 else:
                     st.info("No obvious single-variable risk levers detected for this project.")
             except Exception as e:
-                st.info(f"Couldn't compute heuristic levers: {e}")            # ----- Estimated CM2% Forecast from signals (Ridge)
+                st.info(f"Couldn't compute heuristic levers: {e}")
+
+            # ----- Estimated CM2% Forecast from signals (Ridge)
             st.markdown("#### Estimated CM2% Forecast (signals-based)")
-            fore_col = (
+            fore_col2 = (
                 find_col(df, ["cm2pct", "forecast"]) or
                 find_col(df, ["cm2", "pct", "forecast"]) or
                 "cm2pct_forecast"
             )
-            if fore_col in df.columns:
-                y_fore = pd.to_numeric(df[fore_col], errors="coerce")
+            if fore_col2 in df.columns:
+                y_fore = pd.to_numeric(df[fore_col2], errors="coerce")
                 mask = y_fore.notna()
 
-                # Build features fresh for regression (don't rely on earlier blocks)
                 F_fore = pd.DataFrame(index=df.index)
                 for s in SERVICE_BLOCKS:
                     for suf in ["b_o","h_o","delay"]:
@@ -849,4 +846,15 @@ with tabs[7]:
                         reg = Pipeline([("scaler", StandardScaler()), ("reg", Ridge(alpha=1.0))])
                         reg.fit(F_reg, y_reg)
                         yhat = float(reg.predict(F_fore.loc[row.index])[0])
-                        
+                        r2 = r2_score(y_reg, reg.predict(F_reg))
+                        cA, cB = st.columns(2)
+                        with cA:
+                            st.metric("Estimated CM2% Forecast", f"{yhat:.2f}%")
+                        with cB:
+                            st.caption(f"In-sample R²: {r2:.2f}")
+                    except Exception as e:
+                        st.info(f"Couldn't fit CM2% model: {e}")
+                else:
+                    st.info("Not enough rows or features to estimate CM2% forecast.")
+            else:
+                st.info("CM2% Forecast column not found.")
