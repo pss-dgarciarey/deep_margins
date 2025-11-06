@@ -1097,7 +1097,7 @@ with tabs[7]:
                             F[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
                     F = F.fillna(0)
 
-                    projF = F.loc[sel_idx]
+                    projF = F.loc[[sel_idx]].iloc[0]
 
                     # Flag levers: more common among negative outcomes
                     flag_cols = [c for c in F.columns if c.endswith("_flag")]
@@ -1230,33 +1230,31 @@ with tabs[7]:
                                 yhat = (1 - w) * yhat + w * neg_med
                             else:
                                 w = min(1.0, (0.5 - p) / 0.35)
-                                yhat = (1 - w) * yhat + w * pos_med)
+                                yhat = (1 - w) * yhat + w * pos_med
 
                         # Clip to sensible range and soften extremes
                         q02, q50, q98 = np.nanpercentile(y_reg, [2, 50, 98])
                         yhat = max(q02, min(q98, yhat))
                         yhat = q50 + 0.85 * (yhat - q50)
 
+                        # Optional: R² (uses sklearn.metrics.r2_score already imported)
+                        try:
+                            r2 = r2_score(y_reg, y_hat_train)
+                            r2_text = f"{r2:.2f}"
+                        except Exception:
+                            r2_text = "—"
+
                         st.metric(
                             f"Estimated CM2% ({'real' if target_col==REAL_DEV_COL else 'forecast'} target, calibrated)",
                             f"{yhat:.1f}%"
                         )
-                        # Optional: quick R² without relying on sklearn.metrics
-                        def _r2(y_true, y_pred):
-                            y_true = np.asarray(y_true, dtype=float)
-                            y_pred = np.asarray(y_pred, dtype=float)
-                            if y_true.size < 2 or not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
-                                return np.nan
-                            ss_res = np.sum((y_true - y_pred) ** 2)
-                            ss_tot = np.sum((y_true - y_true.mean()) ** 2)
-                            return 1.0 * (1 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-                        r2 = _r2(y_reg, y_hat_train)
                         st.caption(
                             f"Targets real CM2% when available; otherwise forecast. "
                             f"Linear + quantile calibration, probability-anchored; clipped to 2–98th pct. "
-                            f"In-sample R² = {('—' if (r2 is None or (isinstance(r2, float) and np.isnan(r2))) else f'{r2:.2f}')}."
+                            f"In-sample R² = {r2_text}."
                         )
                     except Exception as e:
                         st.info(f"Couldn't fit CM2% estimator: {e}")
                 else:
                     st.info("Not enough rows/columns to fit CM2% estimator.")
+
