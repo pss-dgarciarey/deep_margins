@@ -1142,83 +1142,88 @@ with tabs[7]:
             except Exception as e:
                 st.info(f"Couldn't compute heuristic levers: {e}")
 
-            # ---------------- Estimated CM2% (signals-based, calibrated & anchored) ----------------
+            # ----- Estimated CM2% (signals-based, robust + isotonic calibrated) -----
             st.markdown("#### Estimated CM2% (signals-based)")
-
+            
             # Prefer REAL outcome if present; fallback to forecast
             target_col = REAL_DEV_COL if (REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 8) else (
                 find_col(df, ["cm2pct","forecast"]) or "cm2pct_forecast"
             )
-
             if target_col not in df.columns:
                 st.info("No target column (real or forecast) found to train an estimator.")
             else:
+                from sklearn.linear_model import HuberRegressor
+                from sklearn.isotonic import IsotonicRegression
+            
+                sel_idx = row.index[0]
                 y_target = pd.to_numeric(df[target_col], errors="coerce")
                 mask = y_target.notna()
-
-                # Build features
-                F_fore = pd.DataFrame(index=df.index)
+            
+                # -------- Features (flags + totals + counts + scale) --------
+                F = pd.DataFrame(index=df.index)
+            
+                # Per-service flags
+                flag_cols = []
                 for s_ in SERVICE_BLOCKS:
                     for suf_ in ["b_o", "h_o", "delay"]:
-                        coln_ = f"{s_}_{suf_}"
-                        if coln_ in df.columns:
-                            F_fore[f"{coln_}_flag"] = (pd.to_numeric(df[coln_], errors="coerce").fillna(0) > 0).astype(int)
+                        coln = f"{s_}_{suf_}"
+                        if coln in df.columns:
+                            fcol = f"{coln}_flag"
+                            F[fcol] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
+                            flag_cols.append(fcol)
+            
+                # Totals & size
                 for cfeat_ in ["total_penalties", "total_delays", "total_o", "contract_value"]:
                     if cfeat_ in df.columns:
-                        F_fore[cfeat_] = pd.to_numeric(df[cfeat_], errors="coerce").fillna(0)
-                F_fore = F_fore.fillna(0)
-
-                F_reg = F_fore.loc[mask]
+                        F[cfeat_] = pd.to_numeric(df[cfeat_], errors="coerce").fillna(0)
+            
+                # Derived counts + any flags
+                def _sum_flags(prefix):
+                    cols = [c for c in flag_cols if c.endswith(prefix)]
+                    return F[cols].sum(axis=1) if cols else pd.Series(0, index=F.index)
+            
+                F["count_b_o"] = _sum_flags("b_o_flag")
+                F["count_h_o"] = _sum_flags("h_o_flag")
+                F["count_delay"] = _sum_flags("delay_flag")
+                F["any_b_o"] = (F["count_b_o"] > 0).astype(int)
+                F["any_h_o"] = (F["count_h_o"] > 0).astype(int)
+                F["any_delay"] = (F["count_delay"] > 0).astype(int)
+            
+                # Scale proxy
+                if "contract_value" in F.columns:
+                    F["log_contract"] = np.log1p(F["contract_value"])
+            
+                F = F.fillna(0)
+            
+                # Train set
+                F_reg = F.loc[mask]
                 y_reg = y_target.loc[mask]
-
-                if F_reg.shape[0] >= 8 and F_reg.shape[1] > 0:
+            
+                if F_reg.shape[0] >= 10 and F_reg.shape[1] > 0:
                     try:
-                        # Base model
-                        reg = Pipeline([("scaler", StandardScaler()), ("reg", Ridge(alpha=1.0))])
-                        reg.fit(F_reg, y_reg)
-
-                        # In-sample predictions
-                        y_hat_train = reg.predict(F_reg)
-
-                        # Linear calibration
-                        try:
-                            slope, intercept = np.polyfit(y_hat_train, y_reg, 1)
-                        except Exception:
-                            slope, intercept = 1.0, 0.0
-
-                        # Quantile mapping (non-parametric correction)
-                        qs = np.linspace(0, 1, 11)
-                        edges = np.quantile(y_hat_train, qs)
-                        edges = np.unique(edges)
-                        if edges.size < 3:
-                            edges = np.array([y_hat_train.min(), y_hat_train.mean(), y_hat_train.max()])
-                        centers = (edges[:-1] + edges[1:]) / 2
-
-                        med_targets = []
-                        for i in range(len(edges) - 1):
-                            lo, hi = edges[i], edges[i+1]
-                            if i == len(edges) - 2:
-                                sel_bin = (y_hat_train >= lo) & (y_hat_train <= hi)
-                            else:
-                                sel_bin = (y_hat_train >= lo) & (y_hat_train < hi)
-                            m = np.median(y_reg[sel_bin]) if sel_bin.any() else np.nan
-                            med_targets.append(m)
-                        med_targets = np.array(med_targets)
-                        if np.isnan(med_targets).any():
-                            ok = ~np.isnan(med_targets)
-                            med_targets = np.interp(np.arange(len(med_targets)), np.where(ok)[0], med_targets[ok])
-
-                        # Predict for selected project
-                        base_pred = float(reg.predict(F_fore.loc[[sel_idx]])[0])
-
-                        # Apply calibration and quantile mapping
-                        cal_pred = slope * base_pred + intercept
-                        qm_pred = np.interp(base_pred, centers, med_targets, left=med_targets[0], right=med_targets[-1])
-
-                        # Blend (give more weight to non-param mapping)
-                        yhat = 0.6 * qm_pred + 0.4 * cal_pred
-
-                        # Anchor by P(Non-Profitable) if available and REAL target exists
+                        # Robust base model (less swayed by outliers)
+                        pipe = Pipeline([
+                            ("scaler", StandardScaler(with_mean=False)),
+                            ("huber", HuberRegressor(epsilon=1.5))  # robust to heavy tails
+                        ])
+                        pipe.fit(F_reg, y_reg)
+            
+                        # In-sample preds
+                        y_hat_train = pipe.predict(F_reg)
+            
+                        # Monotonic calibration (fixes “too optimistic on bad / too pessimistic on good”)
+                        iso = IsotonicRegression(out_of_bounds="clip")
+                        iso.fit(y_hat_train, y_reg)
+                        cal_train = iso.predict(y_hat_train)
+            
+                        # Diagnostics after calibration
+                        r2_cal = r2_score(y_reg, cal_train) if y_reg.size > 1 else np.nan
+            
+                        # Predict selected project
+                        base_pred = float(pipe.predict(F.loc[[sel_idx]])[0])
+                        yhat = float(iso.predict([base_pred])[0])
+            
+                        # Probability anchor (pull toward empirical medians by P(negative))
                         pneg = st.session_state.get("prob_neg_val", None)
                         if pneg is not None and REAL_DEV_COL:
                             y_all_full = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
@@ -1226,35 +1231,27 @@ with tabs[7]:
                             neg_med = float(pd.to_numeric(y_target[y_all_full == 1], errors="coerce").median())
                             p = max(0.0, min(1.0, pneg / 100.0))
                             if p >= 0.5:
-                                w = min(1.0, (p - 0.5) / 0.35)  # ramps 50%→85% to w≈1
+                                w = min(1.0, (p - 0.5) / 0.35)       # 50%→85% ramps weight to ~1
                                 yhat = (1 - w) * yhat + w * neg_med
                             else:
                                 w = min(1.0, (0.5 - p) / 0.35)
                                 yhat = (1 - w) * yhat + w * pos_med
-
-                        # Clip to sensible range and soften extremes
+            
+                        # Clip to empirical range and soften extremes
                         q02, q50, q98 = np.nanpercentile(y_reg, [2, 50, 98])
-                        yhat = max(q02, min(q98, yhat))
-                        yhat = q50 + 0.85 * (yhat - q50)
-
-                        # Optional: R² (uses sklearn.metrics.r2_score already imported)
-                        try:
-                            r2 = r2_score(y_reg, y_hat_train)
-                            r2_text = f"{r2:.2f}"
-                        except Exception:
-                            r2_text = "—"
-
+                        yhat = float(np.clip(yhat, q02, q98))
+                        yhat = float(q50 + 0.80 * (yhat - q50))
+            
                         st.metric(
-                            f"Estimated CM2% ({'real' if target_col==REAL_DEV_COL else 'forecast'} target, calibrated)",
+                            f"Estimated CM2% ({'real' if target_col==REAL_DEV_COL else 'forecast'} target, robust-calibrated)",
                             f"{yhat:.1f}%"
                         )
+                        r2_txt = "—" if (isinstance(r2_cal, float) and not np.isfinite(r2_cal)) else f"{r2_cal:.2f}"
                         st.caption(
-                            f"Targets real CM2% when available; otherwise forecast. "
-                            f"Linear + quantile calibration, probability-anchored; clipped to 2–98th pct. "
-                            f"In-sample R² = {r2_text}."
+                            f"Huber + isotonic calibration; anchored by P(negative). "
+                            f"Clipped to 2–98th pct and shrunk to median. Calibrated R² = {r2_txt}."
                         )
                     except Exception as e:
                         st.info(f"Couldn't fit CM2% estimator: {e}")
                 else:
-                    st.info("Not enough rows/columns to fit CM2% estimator.")
-
+                    st.info("Not enough rows/columns to fit robust CM2% estimator.")
