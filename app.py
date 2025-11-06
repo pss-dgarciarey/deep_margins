@@ -1,7 +1,3 @@
-# ================================================================
-# app.py — Deep Margins Dashboard (login, themes, NL probabilities)
-# ================================================================
-
 import re
 import numpy as np
 import pandas as pd
@@ -398,6 +394,11 @@ REAL_DEV_COL = (
     find_col(df, ["cm2pct","dev"])
 )
 
+# Create profit label (Profitable vs Non-Profitable) based on Real CM2% Deviation
+if REAL_DEV_COL:
+    df["profit_label"] = np.where(pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0,
+                                  "Non-Profitable", "Profitable")
+
 # ------------------------------------------------------------
 # KPIs (label only changed; calculations unchanged)
 # ------------------------------------------------------------
@@ -444,7 +445,8 @@ PRETTY_UP = {k.upper(): v for k,v in SERVICE_PRETTY.items()}
 # ------------------------------------------------------------
 tabs = st.tabs([
     "Overview", "Internal Services Metrics",
-    "Margin Bridge", "Probabilities", "Overrun Heatmap", "Drivers"
+    "Margin Bridge", "Probabilities", "Overrun Heatmap", "Drivers",
+    "Profitability vs Variables", "Project Analyzer"
 ])
 
 # ------------------------------------------------------------
@@ -591,7 +593,7 @@ Pick the **Outcome metric** below (default tries to use “Real CM2% Deviation�
 ---
 
 ### How to write queries (plain language)
-Use **AND/OR**, numbers with **k/m/bn**, and phrases like **over/under/at least/no more than**.
+Use **AND/OR**, numbers with **k/m/bn**, and phrases like **over/under/at least/no more than**.  
 Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budget is overrun”*).
 
 **Delays**
@@ -816,8 +818,8 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
             b_num = st.selectbox("Numeric variable", numeric_candidates if numeric_candidates else df.columns,
                                  index=bn_idx, format_func=humanize_col, key="p_b_num_sel")
             b_comp = st.selectbox("Compare", ["≥", ">", "≤", "<", "=", "=="],
-                                  index=["≥",">","≤","<","=","=="].index(st.session_state.get("b_op","≥")),
-                                  key="p_b_op_sel")
+                                   index=["≥",">","≤","<","=","=="].index(st.session_state.get("b_op","≥")),
+                                   key="p_b_op_sel")
             b_thr = st.number_input("Threshold (B)", value=float(st.session_state.get("b_thr",0.0)), step=1.0, key="p_b_thr_num")
         with colF:
             b_flag = st.selectbox("Flag variable (0/1)", flag_candidates if flag_candidates else df.columns,
@@ -854,7 +856,7 @@ Delays/overruns understand natural phrasing (e.g., *“is delayed”*, *“budge
             c_num = st.selectbox("Numeric to convert → flag", numeric_candidates if numeric_candidates else df.columns,
                                  index=cn_idx, format_func=humanize_col, key="p_c_num_sel")
             c_op = st.selectbox("Operator", ["≥", ">", "≤", "<", "=", "=="],
-                                index=["≥",">","≤","<","=","=="].index(st.session_state.get("c_op","≥")), key="p_c_op_sel")
+                                 index=["≥",">","≤","<","=","=="].index(st.session_state.get("c_op","≥")), key="p_c_op_sel")
             c_thr = st.number_input("Threshold (C)", value=float(st.session_state.get("c_thr",0.0)), step=1.0, key="p_c_thr_num")
 
         conv_flag = to_flag(df[c_num], c_op, float(c_thr))
@@ -947,3 +949,82 @@ with tabs[5]:
             )
             fig8.update_layout(showlegend=False)
             st.plotly_chart(fig8, use_container_width=True, config=plotly_config("drivers_services"))
+
+# ------------------------------------------------------------
+# 7) Profitability vs Variables
+# ------------------------------------------------------------
+with tabs[6]:
+    st.subheader("Profitability vs Variables")
+    if REAL_DEV_COL is None:
+        st.info("No profitability outcome metric found in data.")
+    else:
+        # Select variable to analyze
+        var_options = [c for c in ["total_penalties", "total_delays", "total_h_o", "total_b_o", "total_o", "eng_delay"] if c in df.columns]
+        selected_var = st.selectbox("Select variable", var_options, format_func=humanize_col)
+        if selected_var:
+            # Determine if selected variable is binary (flag) or numeric
+            series = pd.to_numeric(df[selected_var], errors="coerce")
+            prof_df = df[df.get("profit_label") == "Profitable"]
+            nonprof_df = df[df.get("profit_label") == "Non-Profitable"]
+            prof_vals = pd.to_numeric(prof_df[selected_var], errors="coerce")
+            nonprof_vals = pd.to_numeric(nonprof_df[selected_var], errors="coerce")
+            if is_binary_series(df[selected_var]) or series.dropna().nunique() <= 2:
+                # Binary flag variable
+                perc_prof = (prof_vals.fillna(0) > 0).mean() * 100 if len(prof_vals) > 0 else 0.0
+                perc_nonprof = (nonprof_vals.fillna(0) > 0).mean() * 100 if len(nonprof_vals) > 0 else 0.0
+                st.write(f"Projects with {humanize_col(selected_var)} = Yes – Profitable: **{perc_prof:.1f}%**, Non-Profitable: **{perc_nonprof:.1f}%**")
+                fig = px.bar(
+                    x=["Profitable", "Non-Profitable"], 
+                    y=[perc_prof, perc_nonprof],
+                    labels={"x": "Outcome", "y": f"Percentage of projects with {humanize_col(selected_var)}"}
+                )
+                st.plotly_chart(fig, use_container_width=True, config=plotly_config("var_binary"))
+            else:
+                # Numeric variable
+                med_prof = prof_vals.median() if not prof_vals.dropna().empty else float("nan")
+                med_nonprof = nonprof_vals.median() if not nonprof_vals.dropna().empty else float("nan")
+                st.write(f"Median {humanize_col(selected_var)} – Profitable: **{med_prof:.2f}**, Non-Profitable: **{med_nonprof:.2f}**")
+                fig = px.histogram(
+                    df, x=selected_var, color="profit_label", barmode="overlay", nbins=15,
+                    category_orders={"profit_label": ["Profitable", "Non-Profitable"]},
+                    labels={selected_var: humanize_col(selected_var), "profit_label": "Outcome"}
+                )
+                fig.update_traces(opacity=0.75)
+                st.plotly_chart(fig, use_container_width=True, config=plotly_config("var_dist"))
+
+# ------------------------------------------------------------
+# 8) Project Analyzer
+# ------------------------------------------------------------
+with tabs[7]:
+    st.subheader("Project Analyzer")
+    if REAL_DEV_COL is None:
+        st.info("Cannot analyze projects without an outcome metric.")
+    else:
+        project_names = sorted(df["name"].unique())
+        proj_name = st.selectbox("Select Project", project_names)
+        if proj_name:
+            feat_cols = [c for c in ["total_penalties", "total_delays", "total_o"] if c in df.columns]
+            if not feat_cols:
+                st.info("Required feature columns not found for analysis.")
+            else:
+                X = df[feat_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+                y = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
+                clf = LogisticRegression(max_iter=400)
+                clf.fit(X, y)
+                proj_index = df.index[df["name"] == proj_name]
+                if len(proj_index) == 0:
+                    st.error("Selected project not found in data.")
+                else:
+                    proj_X = X.loc[proj_index]
+                    prob_neg_margin = clf.predict_proba(proj_X)[0][1] * 100
+                    pred_outcome = "Non-Profitable" if prob_neg_margin >= 50 else "Profitable"
+                    # Display project metrics and prediction
+                    val_o = int(df.loc[proj_index, "total_o"].iloc[0]) if "total_o" in df.columns else 0
+                    val_d = int(df.loc[proj_index, "total_delays"].iloc[0]) if "total_delays" in df.columns else 0
+                    val_p = int(df.loc[proj_index, "total_penalties"].iloc[0]) if "total_penalties" in df.columns else 0
+                    st.write(f"**{proj_name}** – Total Overruns: **{val_o}**, Total Delays: **{val_d}**, Total Penalties: **{val_p}**")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Predicted Outcome", pred_outcome)
+                    with col2:
+                        st.metric("Probability of Negative Margin", f"{prob_neg_margin:.1f}%")
