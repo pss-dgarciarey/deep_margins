@@ -985,7 +985,6 @@ with tabs[7]:
     sel_idx = row.index[0]
     r = row.iloc[0]
 
-    # ---------- helpers ----------
     def band_from_prob(pct: float) -> str:
         if pct < 10:  return "Very low"
         if pct < 25:  return "Low"
@@ -993,88 +992,53 @@ with tabs[7]:
         if pct < 75:  return "High"
         return "Extremely high"
 
-    def _num(v, default=0):
-        return pd.to_numeric(pd.Series([v]), errors="coerce").fillna(default).iloc[0]
+    # ---------- Heuristic scoring ----------
+    score_box = {"v": 0}
+    notes = []
 
-    # Build a clean snapshot (avoid the single "0" column)
-    focus = ["eng", "com", "proc", "man", "tpm"]
-    cols = [c for s_ in focus for c in (f"{s_}_b_o", f"{s_}_h_o", f"{s_}_delay") if c in df.columns]
-    snap_rows = [{"Signal": humanize_col(c), "Flag/Count": int(_num(r.get(c, 0)))} for c in cols]
-    if snap_rows:
-        st.dataframe(pd.DataFrame(snap_rows), use_container_width=True)
-        st.caption("Heuristic shown above; below: probability, risk levers, and CM2% estimate.")
-
-    # ---------- Heuristic score (same logic as before) ----------
-    notes, score = [], 0
     def add(flag, pts, label):
-        nonlocal notes, score
         if flag:
-            score += pts
+            score_box["v"] += pts
             notes.append(f"+{pts}: {label}")
 
-    add((_num(r.get("total_penalties", 0)) > 0), 2, "Penalties present")
-    add((_num(r.get("total_o", 0)) > 0),        1, "Hours overrun total > 0")
-    add((_num(r.get("total_delays", 0)) > 0),   1, "Delays total > 0")
+    add((r.get("total_penalties", 0) or 0) > 0, 2, "Penalties present")
+    add((r.get("total_o", 0) or 0) > 0, 1, "Hours overrun total > 0")
+    add((r.get("total_delays", 0) or 0) > 0, 1, "Delays total > 0")
 
-    def any_flag_row(row_s, suffix):
+    def any_flag(row_s, suffix):
         for s_ in SERVICE_BLOCKS:
-            if f"{s_}_{suffix}" in df.columns and _num(row_s.get(f"{s_}_{suffix}", 0)) > 0:
+            v = row_s.get(f"{s_}_{suffix}", 0)
+            if pd.to_numeric(pd.Series([v]), errors="coerce").fillna(0).iloc[0] > 0:
                 return True
         return False
 
-    add(any_flag_row(r, "b_o"), 2, "Budget overrun in at least one service")
-    add(any_flag_row(r, "h_o"), 2, "Hours overrun in at least one service")
-    add(any_flag_row(r, "delay"), 2, "Delay in at least one service")
+    add(any_flag(r, "b_o"), 2, "Budget overrun in at least one service")
+    add(any_flag(r, "h_o"), 2, "Hours overrun in at least one service")
+    add(any_flag(r, "delay"), 2, "Delay in at least one service")
 
-    # Calibrate heuristic score -> probability using dataset (prefers REAL outcome)
-    prob_heur = None
-    if REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 10:
-        from sklearn.isotonic import IsotonicRegression
-        y_all = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
-        # compute score for ALL rows quickly with same logic
-        def score_for_row(rr):
-            s = 0
-            s += 2 if _num(rr.get("total_penalties", 0)) > 0 else 0
-            s += 1 if _num(rr.get("total_o", 0)) > 0 else 0
-            s += 1 if _num(rr.get("total_delays", 0)) > 0 else 0
-            for suf in ["b_o", "h_o", "delay"]:
-                hit = False
-                for s_ in SERVICE_BLOCKS:
-                    c = f"{s_}_{suf}"
-                    if c in df.columns and _num(rr.get(c, 0)) > 0:
-                        hit = True
-                        break
-                if hit:
-                    s += 2
-            return s
-        S = df.apply(score_for_row, axis=1)
-        mask_iso = y_all.notna() & S.notna()
-        if mask_iso.sum() >= 6 and S[mask_iso].nunique() >= 3:
-            iso = IsotonicRegression(out_of_bounds="clip")
-            iso.fit(S[mask_iso], y_all[mask_iso])
-            prob_heur = float(iso.predict([score])[0] * 100.0)
-        else:
-            # fallback: map score to a reasonable range
-            prob_heur = float(np.interp(score, [S.min(), S.max()], [10, 80]))
+    score = score_box["v"]
+    if score <= 0:
+        risk_band = "Very low"
+    elif score <= 2:
+        risk_band = "Low"
+    elif score <= 4:
+        risk_band = "Medium"
+    elif score <= 7:
+        risk_band = "High"
     else:
-        # no outcomes to learn from -> coarse mapping
-        prob_heur = [5, 15, 30, 60, 85][
-            0 if score <= 0 else 1 if score <= 2 else 2 if score <= 4 else 3 if score <= 7 else 4
-        ]
+        risk_band = "Extremely high"
 
-    st.metric("Heuristic risk of Non-Profitable outcome",
-              f"{band_from_prob(prob_heur)} ({prob_heur:.1f}%)")
+    st.metric("Heuristic risk of Non-Profitable outcome", risk_band)
     st.write("**Signals triggering risk:**")
     if notes:
         for n in notes: st.write("- ", n)
     else:
         st.write("- None (clean profile)")
 
-    # ---------- Model probability P(negative) on the same scale ----------
+    # ---------- Probability of non-profitable outcome ----------
     prob_neg_val = None
     if REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 5:
         y_bin = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
-        # features: service flags + totals + size
         F = pd.DataFrame(index=df.index)
         for s_ in SERVICE_BLOCKS:
             for suf_ in ["b_o", "h_o", "delay"]:
@@ -1086,183 +1050,37 @@ with tabs[7]:
                 F[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
         F = F.fillna(0)
         if y_bin.nunique() == 2 and F.shape[1] > 0:
-            try:
-                clf = LogisticRegression(max_iter=600, class_weight="balanced")
-                clf.fit(F, y_bin)
-                prob_neg_val = float(clf.predict_proba(F.loc[[sel_idx]])[0, 1] * 100.0)
-                st.metric("Probability project ends Non-Profitable",
-                          f"{band_from_prob(prob_neg_val)} ({prob_neg_val:.1f}%)")
-            except Exception as e:
-                st.info(f"Couldn't fit probability model: {e}")
+            clf = LogisticRegression(max_iter=600, class_weight="balanced")
+            clf.fit(F, y_bin)
+            prob_neg_val = float(clf.predict_proba(F.loc[[sel_idx]])[0, 1] * 100.0)
+            st.metric("Probability project ends Non-Profitable",
+                      f"{band_from_prob(prob_neg_val)} ({prob_neg_val:.1f}%)")
         else:
             st.info("Not enough variation to fit probability model.")
-    else:
-        st.info("Outcome column not available to fit probability model.")
-    st.session_state["prob_neg_val"] = prob_neg_val
 
-    # Optional: consensus (weighted) to avoid contradictory labels
-    if prob_neg_val is not None:
-        p_cons = 0.6 * prob_neg_val + 0.4 * prob_heur
-        st.metric("Consensus risk",
-                  f"{band_from_prob(p_cons)} ({p_cons:.1f}%)")
-
-    # ---------- Heuristic risk levers ----------
-    st.markdown("#### Heuristic risk levers (what to change first)")
-    levers_rows = []
-    try:
-        if REAL_DEV_COL and df[REAL_DEV_COL].notna().any():
-            y_bin = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
-            F = pd.DataFrame(index=df.index)
-            for s_ in SERVICE_BLOCKS:
-                for suf_ in ["b_o", "h_o", "delay"]:
-                    coln = f"{s_}_{suf_}"
-                    if coln in df.columns:
-                        F[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
-            for cfeat in ["total_penalties", "total_delays", "total_o", "contract_value"]:
-                if cfeat in df.columns:
-                    F[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
-            F = F.fillna(0)
-
-            projF = F.loc[[sel_idx]].iloc[0]
-
-            # Flag levers
-            flag_cols = [c for c in F.columns if c.endswith("_flag")]
-            for c in flag_cols:
-                r_neg = F.loc[y_bin == 1, c].mean() if (y_bin == 1).any() else 0.0
-                r_pos = F.loc[y_bin == 0, c].mean() if (y_bin == 0).any() else 0.0
-                delta_to_neg = r_neg - r_pos
-                if projF[c] == 1 and delta_to_neg > 0:
-                    levers_rows.append({
-                        "Variable": humanize_col(c.replace("_flag","")),
-                        "Project": "Yes",
-                        "Δ toward negative": delta_to_neg,
-                        "Suggestion": "Avoid / resolve",
-                    })
-            # Numeric totals levers
-            for c in ["total_penalties","total_delays","total_o"]:
-                if c in F.columns:
-                    val = float(projF[c])
-                    p_med = float(pd.to_numeric(df.loc[y_bin==0, c], errors="coerce").median())
-                    n_med = float(pd.to_numeric(df.loc[y_bin==1, c], errors="coerce").median())
-                    if np.isfinite(val) and np.isfinite(p_med) and np.isfinite(n_med):
-                        if n_med > p_med and val > p_med:
-                            levers_rows.append({
-                                "Variable": humanize_col(c),
-                                "Project": f"{val:.2f}",
-                                "Δ toward negative": (n_med - p_med),
-                                "Suggestion": f"Reduce ≤ {p_med:.2f}",
-                            })
-                        elif n_med < p_med and val < p_med:
-                            levers_rows.append({
-                                "Variable": humanize_col(c),
-                                "Project": f"{val:.2f}",
-                                "Δ toward negative": (p_med - n_med),
-                                "Suggestion": f"Increase ≥ {p_med:.2f}",
-                            })
-        if levers_rows:
-            st.dataframe(pd.DataFrame(levers_rows).sort_values("Δ toward negative", ascending=False).head(8),
-                         use_container_width=True)
-        else:
-            st.info("No obvious single-variable risk levers detected for this project.")
-    except Exception as e:
-        st.info(f"Couldn't compute heuristic levers: {e}")
-
-    # ---------- Estimated CM2% (signals-based, robust + isotonic calibrated) ----------
-    st.markdown("#### Estimated CM2% (signals-based)")
-    target_col = REAL_DEV_COL if (REAL_DEV_COL and df[REAL_DEV_COL].notna().sum() >= 8) else (
-        find_col(df, ["cm2pct","forecast"]) or "cm2pct_forecast"
-    )
-    if target_col not in df.columns:
-        st.info("No target column (real or forecast) found to train an estimator.")
-    else:
-        from sklearn.linear_model import HuberRegressor
-        from sklearn.isotonic import IsotonicRegression
-
-        y_target = pd.to_numeric(df[target_col], errors="coerce")
-        mask = y_target.notna()
-
-        # Features
-        F_reg = pd.DataFrame(index=df.index)
+    # ---------- Estimated CM2% Forecast ----------
+    st.markdown("#### Estimated CM2% Forecast (signals-based)")
+    fore_col = find_col(df, ["cm2pct", "forecast"]) or "cm2pct_forecast"
+    if fore_col in df.columns:
+        y_fore = pd.to_numeric(df[fore_col], errors="coerce")
+        mask = y_fore.notna()
+        F_fore = pd.DataFrame(index=df.index)
         for s_ in SERVICE_BLOCKS:
             for suf_ in ["b_o", "h_o", "delay"]:
                 coln = f"{s_}_{suf_}"
                 if coln in df.columns:
-                    F_reg[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
+                    F_fore[f"{coln}_flag"] = (pd.to_numeric(df[coln], errors="coerce").fillna(0) > 0).astype(int)
         for cfeat in ["total_penalties", "total_delays", "total_o", "contract_value"]:
             if cfeat in df.columns:
-                F_reg[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
-        # derived counts + scale
-        flag_cols = [c for c in F_reg.columns if c.endswith("_flag")]
-        for suffix in ["b_o_flag","h_o_flag","delay_flag"]:
-            cols = [c for c in flag_cols if c.endswith(suffix)]
-            F_reg[f"count_{suffix[:-5]}"] = F_reg[cols].sum(axis=1) if cols else 0
-        F_reg["any_b_o"] = (F_reg["count_b_o"] > 0).astype(int) if "count_b_o" in F_reg else 0
-        F_reg["any_h_o"] = (F_reg["count_h_o"] > 0).astype(int) if "count_h_o" in F_reg else 0
-        F_reg["any_delay"] = (F_reg["count_delay"] > 0).astype(int) if "count_delay" in F_reg else 0
-        if "contract_value" in F_reg.columns:
-            F_reg["log_contract"] = np.log1p(F_reg["contract_value"])
+                F_fore[cfeat] = pd.to_numeric(df[cfeat], errors="coerce").fillna(0)
+        F_fore = F_fore.fillna(0)
 
-        F_reg = F_reg.fillna(0)
-        X = F_reg.loc[mask]
-        y = y_target.loc[mask]
-
-        if X.shape[0] >= 10 and X.shape[1] > 0:
+        if F_fore.shape[0] >= 10:
             try:
-                # robust base model
-                pipe = Pipeline([
-                    ("scaler", StandardScaler(with_mean=False)),
-                    ("huber", HuberRegressor(epsilon=1.5))
-                ])
-                pipe.fit(X, y)
-
-                # in-sample preds and monotonic calibration
-                y_hat_train = pipe.predict(X)
-                iso = IsotonicRegression(out_of_bounds="clip")
-                iso.fit(y_hat_train, y)
-                cal_train = iso.predict(y_hat_train)
-
-                # tiny local R² (avoids sklearn.metrics dependency issues)
-                def _r2(y_true, y_pred):
-                    y_true = np.asarray(y_true, dtype=float)
-                    y_pred = np.asarray(y_pred, dtype=float)
-                    if y_true.size < 2 or not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
-                        return np.nan
-                    ss_res = float(np.sum((y_true - y_pred) ** 2))
-                    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
-                    return (1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-                r2_cal = _r2(y, cal_train)
-
-                # predict selected project
-                base_pred = float(pipe.predict(F_reg.loc[[sel_idx]])[0])
-                yhat = float(iso.predict([base_pred])[0])
-
-                # anchor by model probability if available and REAL target exists
-                pneg = st.session_state.get("prob_neg_val", None)
-                if pneg is not None and REAL_DEV_COL:
-                    y_bin = (pd.to_numeric(df[REAL_DEV_COL], errors="coerce") < 0).astype(int)
-                    pos_med = float(pd.to_numeric(y_target[y_bin == 0], errors="coerce").median())
-                    neg_med = float(pd.to_numeric(y_target[y_bin == 1], errors="coerce").median())
-                    p = max(0.0, min(1.0, pneg / 100.0))
-                    if p >= 0.5:
-                        w = min(1.0, (p - 0.5) / 0.35)
-                        yhat = (1 - w) * yhat + w * neg_med
-                    else:
-                        w = min(1.0, (0.5 - p) / 0.35)
-                        yhat = (1 - w) * yhat + w * pos_med
-
-                # clip to empirical range and soften extremes
-                q02, q50, q98 = np.nanpercentile(y, [2, 50, 98])
-                yhat = float(np.clip(yhat, q02, q98))
-                yhat = float(q50 + 0.80 * (yhat - q50))
-
-                st.metric(
-                    f"Estimated CM2% ({'real' if target_col==REAL_DEV_COL else 'forecast'} target, robust-calibrated)",
-                    f"{yhat:.1f}%"
-                )
-                r2_txt = "—" if (isinstance(r2_cal, float) and not np.isfinite(r2_cal)) else f"{r2_cal:.2f}"
-                st.caption(f"Huber + isotonic calibration; anchored by P(negative). "
-                           f"Clipped to 2–98th pct and shrunk to median. Calibrated R² = {r2_txt}.")
+                pipe = Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=1.0))])
+                pipe.fit(F_fore.loc[mask], y_fore.loc[mask])
+                yhat = float(pipe.predict(F_fore.loc[[sel_idx]])[0])
+                st.metric("Estimated CM2% Forecast", f"{yhat:.1f}%")
             except Exception as e:
                 st.info(f"Couldn't fit CM2% estimator: {e}")
-        else:
-            st.info("Not enough rows/columns to fit robust CM2% estimator.")
+
