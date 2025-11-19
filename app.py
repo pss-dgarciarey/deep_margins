@@ -1,5 +1,5 @@
 #This code is poperty of Power Service Solutions GmbH. 
-#The use, download, distribution os benefit in any way via the use of it without the explicit consent of Power Service Solutions GmbH constitutes a breach in the intelectual property law.
+#The use, download, distribution or benefit in any way via the use of it without the explicit consent of Power Service Solutions GmbH constitutes a breach in the intelectual property law.
 #This code was developed, tested and deployed by Daniel Garcia Rey
 
 # ================================================================
@@ -63,7 +63,7 @@ def apply_theme(name: str):
     px.defaults.template = t["template"]
 
 # (Optional) Simple login — keep disabled for now
-if "auth" not in st.session_state: st.session_state["auth"] = True
+if "auth" not in st.session_state: st.session_state["auth"] = False
 if "theme" not in st.session_state: st.session_state["theme"] = "Corporate"
 
 if not st.session_state["auth"]:
@@ -336,7 +336,7 @@ for col in [
     "contract_value", "cash_received",
     "cm2_forecast", "cm2_actual", "cm2_budget",
     "cm2pct_forecast", "cm2pct_actual", "cm2pct_budget",
-    "total_penalties", "total_o", "total_delays", "check_v"
+    "total_penalties", "total_o", "total_delays", "check_v", "if_pen_eur"
 ]:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -361,13 +361,14 @@ st.title("📊 Deep Margins — PSS Analytics Dashboard")
 
 total_contract = df.get("contract_value", pd.Series(dtype=float)).sum()
 total_cash = df.get("cash_received", pd.Series(dtype=float)).sum()
+total_penalties = df.get("if_pen_eur", pd.Series(dtype=float)).sum()
 weighted_fore_pct = (df.get("cm2_forecast", 0).sum() / total_contract * 100) if total_contract else 0
 weighted_real_pct = (df.get("cm2_actual", 0).sum() / total_contract * 100) if total_contract else 0
 
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1: st.metric("Projects", len(df))
 with c2: st.metric("Contract Value Σ (EUR)", f"{total_contract:,.0f}")
-with c3: st.metric("Cash Received Σ (EUR)", f"{total_cash:,.0f}")
+with c3: st.metric("Spent in Penalties Σ (EUR)", f"{total_penalties:,.0f}")
 with c4: st.metric("Compounded CM2% (Forecast)", f"{weighted_fore_pct:,.1f}%")
 with c5: st.metric("Real CM2% Deviation (weighted)", f"{weighted_real_pct:,.1f}%" if total_contract else "—")
 
